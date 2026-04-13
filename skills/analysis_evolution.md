@@ -98,32 +98,64 @@ Timeline of the analysis from first notebook to current state. Load this to unde
 
 ---
 
+## Phase 7: Production engine — Sprint 1 (2026-04-14)
+
+**Question**: Can the full pipeline be packaged as a production-ready engine with an HTTP API?
+
+**Approach**: Sprint-driven build from a formal feature spec (`feature_docs/feature_doc_sprint_1.md`). Engine split into pure Python package + FastAPI layer. Full match simulation test against the live API.
+
+**Result**: Fully functional. KKR vs LSG replayed ball-by-ball in ~3 seconds. Pre-match signal fires correctly at ball 1. In-game signal fires at balls 60–62 (mild false positive at gate boundary) and 119–120 (correct, actual last-over drama).
+
+**Key findings from simulation run**:
+- Engine bottleneck: `win_prob` NN inference (72% of server time, ~0.33ms/ball)
+- Total engine time: ~0.46ms/ball; HTTP round-trip: ~3–5ms/ball (after `requests.Session()` fix)
+- Balls 60–62 false positive caused by ball 30 hotness=1.0 spike inflating the history window at gate boundary — threshold calibration needed
+- In-game signal fires on consecutive balls (60, 61, 62) — signal deduplication not yet implemented
+
+**Key decisions**:
+- `BallEvent` = legal deliveries only; upstream filters wides/no-balls
+- `balls_fraction` hardcoded to `/120.0` to match NN training
+- Sessions in-memory; stateless across server restarts
+- `requests.Session()` mandatory for simulation — per-request TCP setup costs ~2s on Windows
+
+For full engineering detail see `skills/engine_sprint_1.md`.
+
+---
+
 ## Current state (as of 2026-04-14)
 
 ### What's built and working
 - **Win probability model**: NN trained on 1,184 IPL matches, saved (`win_prob_nn.pt`)
 - **Hotness score**: closeness + momentum formula, validated on 6 matches
 - **Hotness forecaster**: autoregressive MLP, saved (`hotness_forecaster.pt`)
-- **Validation**: 4 labelled matches (2 HOT, 2 COLD) + 2 new matches correctly classified
+- **Production engine**: `engine/` package + `api/` FastAPI layer, fully runnable
+- **Simulation test**: KKR vs LSG replayed end-to-end with latency profiling
 
-### Live notification architecture (designed, not built)
+### Live notification architecture (built)
 ```
-Ball arrives (live data)
-  → compute win_prob (NN)
-  → compute hotness (closeness + momentum)
+POST /match/init  (ball 0 — feed inn1 summary)
+
+Ball arrives → POST /match/{id}/ball
+  → ChaseState updated
+  → features extracted
+  → win_prob (NN)
+  → hotness (closeness + momentum)
   → IF ball == 1 AND win_prob in [0.40, 0.60]:
-      send pre-match alert
-  → IF ball >= 60:
-      feed last 12 hotness values to forecaster
-      IF forecast >= threshold:
-        send in-game alert
+      signal: "50/50 chase — worth watching from the start"
+  → IF ball >= 60 AND history >= 12:
+      forecast (NN)
+      IF forecast >= 0.55:
+        signal: "match heating up — tune in now"
+  → EngineOutput returned (win_prob, hotness, forecast, signals, processing_ms)
 ```
 
 ### What's NOT built yet
 - Live data ingestion (cricsheet is historical only)
 - Notification delivery (Telegram bot / push)
 - Threshold calibration on a larger validation set
-- First innings signals (a 250-run first innings might be worth flagging)
+- Signal deduplication (in-game signal fires on every ball above threshold, not once per crossing)
+- Persistent session store (sessions lost on server restart)
+- First innings signals
 
 ### Model artifacts
 | File | Purpose |
