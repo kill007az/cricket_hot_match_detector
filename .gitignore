@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Secrets / keys
+.env.*
+*.key
+secrets.json
+config/secrets.yaml
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Bulk data (large IPL JSON zip/extracted dirs)
+data/ipl_json/
+data/raw_bulk/
+data/*.zip
+
+# Test artifacts
+.pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+
+# Logs
+*.log
+logs/
+
+# API runtime
+uvicorn.pid
