@@ -26,8 +26,8 @@ engine/
     signals.py       — SignalEvaluator (pre-match + in-game thresholds)
     orchestrator.py  — EngineOrchestrator (pipeline coordinator, sessions dict)
 
-api/
-    main.py          — FastAPI app, lifespan model loading onto app.state.engine
+engine/  (routes + server moved here from api/ in sprint 2)
+    server.py        — FastAPI app, lifespan model loading onto app.state.engine
     routes.py        — POST /match/init, POST /match/{id}/ball, GET /match/{id}/state,
                        GET /debug/latency
 
