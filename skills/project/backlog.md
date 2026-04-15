@@ -76,19 +76,27 @@ Prioritised list of fixes and improvements. ✅ = implemented.
 ---
 
 ### P3 — Super over not detected ✅
-**Files:** `polling/poller.py` → `_phase3_poll_inn2()`  
-**Problem:** If a T20 ends in a tie, a super over is bowled. Poller would stop at `balls_remaining == 0` (ball 120) and miss it entirely.  
-**Fix (two signals):**
-1. **Commentary text**: scan for `"super over"` keyword — if found after ball 120, print notice and continue polling.
-2. **Ball count**: if `balls_faced > 120`, don't stop on `balls_remaining == 0`.  
-Note: engine's `balls_fraction` hardcoded to `/120` — super over balls slightly mis-calibrate models, acceptable for now.
+**Files:** `polling/poller.py` → `_phase3_poll_inn2()`, `_detect_super_over()`  
+**Fix:** Commentary text scanned for `"super over"` keyword; `_super_over` flag set when detected. End condition gates updated — `balls_remaining == 0` ignored during super over; ends on `runs_needed == 0`, `wickets >= 2`, or `super_over_balls >= 12`. Loops for repeated super overs.
 
 ---
 
 ### P4 — Post-match Cricsheet data collection
 **Files:** New script `scripts/fetch_cricsheet.py`  
 **Problem:** Cricsheet JSON for a match becomes available the day after. No automated way to fetch and store in `data/raw/` for retraining/validation.  
-**Fix:** Script accepts match date + team names, queries Cricsheet download endpoint, saves to `data/raw/`. See `skills/fetch_ball_by_ball.md` for Cricsheet API details.
+**Fix:** Script accepts match date + team names, queries Cricsheet download endpoint, saves to `data/raw/`. See `skills/data/fetch_ball_by_ball.md` for Cricsheet API details.
+
+---
+
+### P5 — Auto-discovery of live Cricbuzz match ID (HIGH PRIORITY)
+**Files:** `polling/cricbuzz_client.py` → `find_live_match()`, `polling/poller.py` → `_phase1_find_match()`, `polling/run_live.py`, `run.py`  
+**Problem:** The old Cricbuzz live-listing endpoint (`/api/cricket-match/live-matches`) returned 404 in April 2026. Auto-discovery was disabled; `--cb-id` is now mandatory. Users must manually find the numeric match ID from the Cricbuzz URL each time.  
+**Fix:** Capture a new HAR from `cricbuzz.com/cricket-match/live` during a live match to find the current live-listing endpoint. Once found:
+1. Update `find_live_match()` in `cricbuzz_client.py` with the new URL
+2. Restore auto-discovery loop in `_phase1_find_match()` — poll until target teams appear
+3. Make `--cb-id` optional again (falls back to auto-discovery if omitted)
+4. Update `skills/live/cricbuzz_api_endpoints.md` with the new endpoint  
+**How to find it:** Open DevTools on `cricbuzz.com/cricket-match/live` during a live match, filter XHR, look for a JSON response listing multiple live matches. Follow HAR capture steps in `skills/live/cricbuzz_api_endpoints.md`.
 
 ---
 
