@@ -110,7 +110,7 @@ docker compose up --build
 
 **`--cb-id` is required** — find the numeric Cricbuzz match ID in the match URL
 (e.g. `cricbuzz.com/live-cricket-scores/151763/...` → ID is `151763`).
-Auto-discovery is currently unavailable; see `skills/cricbuzz_api_endpoints.md`.
+Auto-discovery is currently unavailable; see `skills/live/cricbuzz_api_endpoints.md`.
 
 ```bash
 # docker-compose.override.yml
@@ -273,6 +273,8 @@ Phase 2 iteratively fetches inn1, sleeps `remaining_balls × 35s`, and repeats u
 - [engine/README.md](engine/README.md) — pipeline internals, data structures, model details
 - [tests/README.md](tests/README.md) — simulation guide and how to add new matches
 - [working_context.md](working_context.md) — running log of sprint decisions
-- [skills/analysis_evolution.md](skills/analysis_evolution.md) — how the model evolved across NB01–NB07
-- [skills/model_design_3.md](skills/model_design_3.md) — model design reference (ML / NN details)
-- [skills/fetch_ball_by_ball.md](skills/fetch_ball_by_ball.md) — post-match historical data retrieval from Cricsheet
+- [skills/model/analysis_evolution.md](skills/model/analysis_evolution.md) — how the model evolved across NB01–NB07
+- [skills/model/model_design_3.md](skills/model/model_design_3.md) — model design reference (ML / NN details)
+- [skills/data/fetch_ball_by_ball.md](skills/data/fetch_ball_by_ball.md) — post-match historical data retrieval from Cricsheet
+- [skills/live/cricbuzz_api_endpoints.md](skills/live/cricbuzz_api_endpoints.md) — Cricbuzz API endpoints + rediscovery guide
+- [skills/project/backlog.md](skills/project/backlog.md) — prioritised fix and improvement list

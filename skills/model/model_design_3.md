@@ -17,7 +17,7 @@ Detect in real-time whether an ongoing T20 cricket match is becoming "hot" (comp
 
 ## Data source
 
-**cricsheet.org** — ball-by-ball JSON for all matches. See `skills/fetch_ball_by_ball.md` for retrieval.
+**cricsheet.org** — ball-by-ball JSON for all matches. See `skills/data/fetch_ball_by_ball.md` for retrieval.
 
 Training data: **1,159 IPL matches** (2008–2026) successfully parsed, ~128,500 ball-states extracted from 2nd innings chases.
 
@@ -107,7 +107,7 @@ hotness = (closeness * 0.6 + momentum * 5 * 0.4).clip(0, 1)
 
 **Dataset statistics** (from NB07 on 1,159 matches):
 - Mean hotness per ball: 0.364
-- 25.1% of balls exceed 0.55 threshold
+- 25.1% of balls exceed 0.55 (current threshold is 0.60 — calibrated after first live run)
 - 79% of IPL matches have at least one ball exceeding 0.55
 - 9.5% of balls exceed 0.70
 
