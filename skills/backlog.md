@@ -1,6 +1,6 @@
 # Backlog — Cricket Hot Match Detector
 
-Prioritised list of fixes and improvements. Add new items at the bottom of each section.
+Prioritised list of fixes and improvements. ✅ = implemented.
 
 ---
 
@@ -13,22 +13,15 @@ Prioritised list of fixes and improvements. Add new items at the bottom of each 
 
 ---
 
-### B2 — Innings end condition missing (loss by runs)
+### B2 — Innings end condition missing (loss by runs) ✅
 **Files:** `polling/poller.py` → `_phase3_poll_inn2()`  
-**Problem:** End condition only checks `wickets >= 10` or `runs_needed == 0`. If batting team completes 20 overs without being all out and falls short, poller loops forever.  
-**Fix:** Add: `balls_remaining == 0` (or `balls_faced >= total_balls`) as a third end condition → print match over, exit Phase 3.
+**Fix:** Added `balls_remaining == 0` as third end condition alongside `wickets >= 10` and `runs_needed == 0`.
 
 ---
 
-### B3 — Smart wait undershoots (iterative approach needed)
-**Files:** `polling/poller.py` → `_phase2_wait_for_inn2()`, `_estimate_inn1_remaining_secs()`  
-**Problem:** One-shot sleep of `remaining_balls × 35s` ends too early — real pace per ball is higher than 35s.  
-**Fix:** Replace one-shot sleep with iterative loop:
-1. Fetch inn1, count balls bowled
-2. If complete → exit loop
-3. Else sleep `remaining × 35s`, then go to 1
-After loop exits (inn1 done), wait 5 min, then start 5-min inn2 poll loop as normal.  
-No need to calibrate the 35s constant — loop self-corrects.
+### B3 — Smart wait undershoots (iterative approach needed) ✅
+**Files:** `polling/poller.py` → `_smart_wait_for_inn1_complete()`  
+**Fix:** Iterative loop — fetch inn1, sleep `remaining × 35s`, repeat until `bowled >= 120`. Self-corrects on each undershoot.
 
 ---
 
@@ -48,39 +41,66 @@ No need to calibrate the 35s constant — loop self-corrects.
 
 ---
 
-### M3 — Forecast threshold too low
+### M3 — Forecast threshold too low ✅
 **Files:** `engine/signals.py` → `FORECAST_THRESHOLD`  
-**Problem:** Current threshold 0.55 may fire too readily.  
-**Fix:** Change `FORECAST_THRESHOLD = 0.55` → `0.60`. Re-validate on historical matches.
+**Fix:** Changed `FORECAST_THRESHOLD` from `0.55` → `0.60`.
 
 ---
 
 ## UX / display improvements
 
-### U1 — Add cumulative score/wickets to Phase 3 table
+### U1 — Add cumulative score/wickets to Phase 3 table ✅
 **Files:** `polling/poller.py` → `_print_ball()`  
-**Problem:** Table shows per-ball runs/extras/wickets but no running total — hard to follow match state.  
-**Fix:** Track `cumulative_runs` and `wickets` in the output dict (already in `EngineOutput`) and add columns to the printed table.
+**Fix:** Added `{wickets}w/{runs_needed}rr` score column to the printed table.
 
 ---
 
-### U2 — Display Win% and Hotness as percentages
+### U2 — Display Win% and Hotness as percentages ✅
 **Files:** `polling/poller.py` → `_print_ball()`  
-**Problem:** Values displayed as `0.384` — requires mental conversion.  
-**Fix:** Format as `38.4%` and `46.1%`. Adjust column widths accordingly.
+**Fix:** Formatted as `38.4%` and `46.1%`. Column widths adjusted.
 
 ---
 
 ## Polling behaviour
 
-### P1 — Stale warnings fire during strategic timeouts
-**Files:** `polling/poller.py` → `_check_stale()`  
-**Problem:** IPL has two 2.5-min strategic timeouts per innings. Stale warning fires during these expected pauses.  
-**Fix:** Suppress stale warning for ~3 min after overs 6 and 10 (or make the warning threshold slightly higher — currently 3 min, could move to 5 min).
+### P1 — Stale warnings fire during strategic timeouts ✅
+**Files:** `polling/poller.py` → `_detect_timeout()`, `_phase3_poll_inn2()`  
+**Fix:** On no-new-balls poll, scan the 10 most recent commentary items for timeout keywords (`"strategic timeout"`, `"timeout"`, `"strategic break"`). If found, sleep 150s and skip stale check. Commentary-driven, not fixed-over.
 
 ---
 
-### P2 — Raw inn2 poll files accumulate (215 files per match)
+### P2 — Raw inn2 poll files accumulate (215 files per match) ✅
 **Files:** `polling/poller.py` → `_phase3_poll_inn2()`  
-**Problem:** Every poll writes a new timestamped `raw_inn2_{HHMMSS}.json`. One match = ~215 files. Cricbuzz returns full commentary history each poll so old files are entirely redundant.  
-**Fix:** Ping-pong buffer — alternate writes between `raw_inn2_a.json` and `raw_inn2_b.json`. One file is always intact if a crash corrupts the one being written. Delete all timestamped `raw_inn2_*.json` files after implementing. Keep `raw_inn1_*.json` as-is (written once, no accumulation).
+**Fix:** Ping-pong buffer — alternate writes between `raw_inn2_a.json` and `raw_inn2_b.json`. One file always intact if a crash corrupts the one being written.
+
+---
+
+### P3 — Super over not detected ✅
+**Files:** `polling/poller.py` → `_phase3_poll_inn2()`  
+**Problem:** If a T20 ends in a tie, a super over is bowled. Poller would stop at `balls_remaining == 0` (ball 120) and miss it entirely.  
+**Fix (two signals):**
+1. **Commentary text**: scan for `"super over"` keyword — if found after ball 120, print notice and continue polling.
+2. **Ball count**: if `balls_faced > 120`, don't stop on `balls_remaining == 0`.  
+Note: engine's `balls_fraction` hardcoded to `/120` — super over balls slightly mis-calibrate models, acceptable for now.
+
+---
+
+### P4 — Post-match Cricsheet data collection
+**Files:** New script `scripts/fetch_cricsheet.py`  
+**Problem:** Cricsheet JSON for a match becomes available the day after. No automated way to fetch and store in `data/raw/` for retraining/validation.  
+**Fix:** Script accepts match date + team names, queries Cricsheet download endpoint, saves to `data/raw/`. See `skills/fetch_ball_by_ball.md` for Cricsheet API details.
+
+---
+
+## Analysis & debug
+
+### A1 — Match analysis / debug view
+**Files:** New service, e.g. `analysis/` or extension of `orchestrator/`  
+**Scope:** Debug and post-match analysis tool that reads `engine_outputs.jsonl` and `ball_events.jsonl` and produces:
+- Win prob curve (ball-by-ball line chart)
+- Hotness curve (with forecast overlay where available)
+- "Is getting hot" signal timeline — when/if in-game signal fired and at what ball
+- Key turning points — balls with largest win prob swing (wickets, boundaries)
+- Raw ball-by-ball table (over, runs, extras, wicket, win%, hotness, forecast, signals)
+- Works both in real-time (reads live JSONL as it grows) and post-match (reads completed file)  
+**Format:** TBD — could be a Streamlit page, a CLI that outputs to terminal, or a Jupyter notebook template. Needs more design thought before implementation.

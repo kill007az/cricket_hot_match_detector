@@ -31,7 +31,8 @@ Stale data detection
 
 Data persistence  (data/live_polls/{match_id}/)
     raw_inn1_{HHMMSS}.json      full inn1 Cricbuzz response (one-shot)
-    raw_inn2_{HHMMSS}.json      full inn2 Cricbuzz response per poll
+    raw_inn2_a.json             ping-pong buffer A — latest inn2 Cricbuzz response
+    raw_inn2_b.json             ping-pong buffer B — previous inn2 Cricbuzz response
     ball_events.jsonl           one sent BallEvent dict per line
     engine_outputs.jsonl        one EngineOutput dict per line
 """
@@ -57,6 +58,12 @@ _DATA_ROOT = Path(__file__).resolve().parent.parent / "data" / "live_polls"
 # Stale-data thresholds (seconds without a new ball during active Phase 3)
 _STALE_WARN_SECS     = 180   # 3 min  → WARNING
 _STALE_CRITICAL_SECS = 600   # 10 min → second louder warning
+
+# Strategic timeout suppression — detected via commentary text, not fixed overs.
+# When a timeout item is found in commentary, the poller sleeps _TIMEOUT_SLEEP_SECS
+# before resuming normal polling. Avoids spurious stale-data warnings.
+_TIMEOUT_KEYWORDS    = {"strategic timeout", "timeout", "strategic break"}
+_TIMEOUT_SLEEP_SECS  = 150   # 2.5 min timeout + small buffer
 
 # Smart Phase 2 wait
 _BALL_DURATION_SECS = 35   # approximate seconds per legal delivery
@@ -87,6 +94,13 @@ class LivePoller:
         self._ball_events_file = self._match_dir / "ball_events.jsonl"
         self._engine_outputs_file = self._match_dir / "engine_outputs.jsonl"
 
+        # Ping-pong buffer for raw inn2 responses (avoids accumulating 200+ files)
+        self._raw_inn2_paths = [
+            self._match_dir / "raw_inn2_a.json",
+            self._match_dir / "raw_inn2_b.json",
+        ]
+        self._raw_inn2_idx: int = 0  # alternates 0/1 each poll
+
         # Set of ball_key strings already sent to the engine this session.
         # Populated from any existing ball_events.jsonl so the poller can
         # resume cleanly if restarted mid-match.
@@ -98,6 +112,8 @@ class LivePoller:
         # Stale-data tracking (Phase 3 only)
         self._last_new_ball_time: Optional[float] = None  # time.monotonic()
         self._stale_critical_fired: bool = False
+        self._super_over: bool = False   # set True if super over detected
+        self._super_over_balls: int = 0  # legal balls counted since super over started
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -139,15 +155,10 @@ class LivePoller:
     def _phase2_wait_for_inn2(self) -> None:
         print("[Phase 2] Waiting for 2nd innings to start...")
 
-        # Smart wait: estimate how long inn1 has left and sleep most of it
-        # before starting to poll, to avoid hammering Cricbuzz during the
-        # entire first innings.
-        smart_wait = self._estimate_inn1_remaining_secs()
-        if smart_wait > 0:
-            mins = smart_wait / 60
-            print(f"[Phase 2] Estimated {mins:.0f}m until inn1 ends — sleeping {smart_wait}s before polling...")
-            time.sleep(smart_wait)
-            print("[Phase 2] Smart wait done — starting inn2 poll loop...")
+        # Iterative smart wait: keep re-fetching inn1 and sleeping until it's
+        # done. Self-corrects if each estimate undershoots.
+        self._smart_wait_for_inn1_complete()
+        print("[Phase 2] Smart wait done — starting inn2 poll loop...")
 
         # Regular polling loop (handles overshoot, rain, called-off, etc.)
         # Poll every 5 minutes here — we only need to detect inn2 starting,
@@ -163,29 +174,40 @@ class LivePoller:
             print(f"[Phase 2] Inn2 not started yet — retrying in {_INN2_WAIT_SECS}s...")
             time.sleep(_INN2_WAIT_SECS)
 
-    def _estimate_inn1_remaining_secs(self) -> int:
+    def _smart_wait_for_inn1_complete(self) -> None:
         """
-        Fetch inn1 commentary, count balls already bowled, and return an
-        estimated number of seconds until inn1 is likely to end.
+        Iteratively fetch inn1, sleep remaining_balls × 35s, repeat until
+        inn1 is complete (bowled >= _INN1_TOTAL_BALLS). Each iteration
+        re-estimates remaining time so any undershoot self-corrects.
+        Falls through immediately if inn1 is already done or on fetch error.
+        """
+        iteration = 0
+        while True:
+            try:
+                items = self._cricbuzz.get_commentary(self._cb_id, innings=1)
+                bowled = count_legal_balls(items)
+                remaining = max(0, _INN1_TOTAL_BALLS - bowled)
+            except Exception as exc:
+                logger.warning(
+                    "Could not fetch inn1 commentary (%s) — skipping smart wait", exc
+                )
+                return
 
-        Returns 0 if inn1 is already complete or on any fetch error
-        (caller falls straight through to the poll loop).
-        """
-        try:
-            items = self._cricbuzz.get_commentary(self._cb_id, innings=1)
-            bowled = count_legal_balls(items)
-            remaining = max(0, _INN1_TOTAL_BALLS - bowled)
             if remaining == 0:
-                print(f"[Phase 2] Inn1 already complete ({bowled} balls) — polling immediately")
-                return 0
+                if iteration == 0:
+                    print(f"[Phase 2] Inn1 already complete ({bowled} balls) — polling immediately")
+                else:
+                    print(f"[Phase 2] Inn1 complete ({bowled} balls) — proceeding to inn2 poll")
+                return
+
             secs = remaining * _BALL_DURATION_SECS
-            print(f"[Phase 2] Inn1 status: {bowled} balls bowled, ~{remaining} remaining")
-            return secs
-        except Exception as exc:
-            logger.warning(
-                "Could not estimate inn1 remaining balls (%s) — falling back to regular polling", exc
+            mins = secs / 60
+            iteration += 1
+            print(
+                f"[Phase 2] Inn1: {bowled} balls bowled, ~{remaining} remaining"
+                f" — sleeping {secs}s ({mins:.0f}m) [iteration {iteration}]"
             )
-            return 0
+            time.sleep(secs)
 
     # ------------------------------------------------------------------
     # Phase 2.5: one-shot inn1 summary fetch → engine init
@@ -227,18 +249,18 @@ class LivePoller:
         print("[Phase 3] Live inn2 polling loop started\n")
         self._last_new_ball_time = time.monotonic()  # start the stale clock from now
         print(
-            f"  {'Over':<6}  {'Runs':>4}  {'Xtr':>4}  {'Wkt':>4}  "
+            f"  {'Over':<6}  {'Score':>7}  {'Runs':>4}  {'Xtr':>4}  {'Wkt':>4}  "
             f"{'Win%':>6}  {'Hot':>6}  {'Fcast':>6}  Signals"
         )
-        print(f"  {'─'*70}")
+        print(f"  {'─'*78}")
 
         while True:
             items = self._cricbuzz.get_commentary(self._cb_id, innings=2)
 
-            # Persist raw response
-            ts = _timestamp()
-            raw_path = self._match_dir / f"raw_inn2_{ts}.json"
+            # Persist raw response — ping-pong between two files
+            raw_path = self._raw_inn2_paths[self._raw_inn2_idx]
             raw_path.write_text(json.dumps(items, ensure_ascii=False, indent=2), encoding="utf-8")
+            self._raw_inn2_idx = 1 - self._raw_inn2_idx
 
             legal_balls = parse_legal_balls(items, innings=2)
             new_balls = [b for b in legal_balls if ball_key(b) not in self._seen]
@@ -257,12 +279,43 @@ class LivePoller:
                     self._append_jsonl(self._engine_outputs_file, output)
                     self._print_ball(ball, output)
 
-                    if output.get("runs_needed", 1) == 0 or output.get("wickets", 0) >= 10:
+                    if self._super_over:
+                        self._super_over_balls += 1
+
+                    # Normal innings end (no super over in play)
+                    if not self._super_over and (
+                        output.get("runs_needed", 1) == 0
+                        or output.get("wickets", 0) >= 10
+                        or output.get("balls_remaining", 1) == 0
+                    ):
                         print(f"\n[Phase 3] Match over — final state:")
                         self._print_final(output)
                         return
+
+                    # Super over in play: end when decisive result or 12 balls done
+                    if self._super_over and (
+                        output.get("runs_needed", 1) == 0
+                        or output.get("wickets", 0) >= 2
+                        or self._super_over_balls >= 12
+                    ):
+                        if output.get("runs_needed", 1) == 0:
+                            # Decisive result — match over
+                            print(f"\n[Phase 3] Match over (super over) — final state:")
+                            self._print_final(output)
+                            return
+                        else:
+                            # Another tie — reset for next super over
+                            print("[Phase 3] Super over tied — another super over incoming...")
+                            self._super_over_balls = 0
             else:
                 logger.debug("No new balls this poll (seen=%d total)", len(self._seen))
+                if not self._super_over and self._detect_super_over(items):
+                    self._super_over = True
+                    print("[Phase 3] Super over detected — continuing to poll...")
+                if self._detect_timeout(items):
+                    print(f"[Phase 3] Strategic timeout detected — sleeping {_TIMEOUT_SLEEP_SECS}s...")
+                    time.sleep(_TIMEOUT_SLEEP_SECS)
+                    continue
                 self._check_stale()
 
             time.sleep(self.poll_interval)
@@ -271,10 +324,32 @@ class LivePoller:
     # Helpers
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _detect_super_over(items: list[dict]) -> bool:
+        """Return True if any recent commentary item mentions a super over."""
+        for item in items[:10]:
+            event = str(item.get("event", "")).lower()
+            text = str(item.get("commText", item.get("commentary", ""))).lower()
+            if "super over" in event or "super over" in text:
+                return True
+        return False
+
+    @staticmethod
+    def _detect_timeout(items: list[dict]) -> bool:
+        """Return True if any recent commentary item mentions a strategic timeout."""
+        for item in items[:10]:  # only check the most recent items
+            event = str(item.get("event", "")).lower()
+            text = str(item.get("commText", item.get("commentary", ""))).lower()
+            for keyword in _TIMEOUT_KEYWORDS:
+                if keyword in event or keyword in text:
+                    return True
+        return False
+
     def _check_stale(self) -> None:
         """Log warnings if no new ball has been received for too long."""
         if self._last_new_ball_time is None:
             return
+
         elapsed = time.monotonic() - self._last_new_ball_time
         if elapsed >= _STALE_CRITICAL_SECS and not self._stale_critical_fired:
             logger.warning(
@@ -327,18 +402,28 @@ class LivePoller:
         over_str = f"{int(ball['over'])}.{round((ball['over'] % 1) * 10):.0f}"
         wkt_str = "YES" if ball["wicket"] else "no"
         fc = output.get("forecast")
-        fc_str = f"{fc:.3f}" if fc is not None else "  —  "
+        fc_str = f"{fc*100:5.1f}%" if fc is not None else "   —  "
         sigs = " | ".join(output.get("signals", [])) if output.get("signals") else ""
         dup = " [dup]" if output.get("is_duplicate") else ""
 
+        # Cumulative score: derived from runs_needed + balls_remaining in output
+        wickets = output.get("wickets", 0)
+        runs_needed = output.get("runs_needed", 0)
+        balls_remaining = output.get("balls_remaining", 0)
+        # target = runs_needed + runs_scored; we don't store target here so use
+        # balls_remaining to infer total_balls and derive runs_scored indirectly.
+        # Simplest: engine returns wickets directly, and we can show W/R-needed.
+        score_str = f"{wickets}w/{runs_needed}rr"
+
         print(
             f"  {over_str:<6}  "
+            f"{score_str:>7}  "
             f"{ball['runs']:>4}  "
             f"{ball['extras']:>4}  "
             f"{wkt_str:>4}  "
-            f"{output.get('win_prob', 0):>6.3f}  "
-            f"{output.get('hotness', 0):>6.3f}  "
-            f"{fc_str:>6}  "
+            f"{output.get('win_prob', 0)*100:>5.1f}%  "
+            f"{output.get('hotness', 0)*100:>5.1f}%  "
+            f"{fc_str:>7}  "
             f"{sigs}{dup}"
         )
 

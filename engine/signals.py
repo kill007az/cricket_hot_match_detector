@@ -6,7 +6,7 @@ Two independent signals (per live architecture in model_design_3.md):
   1. PRE_MATCH  — fired once on ball 1 when the target is a 50/50 chase
   2. IN_GAME    — fired on any ball >= 60 when forecast crosses threshold
 
-Forecast threshold (0.55) is not formally calibrated; see model_design_3.md §open questions.
+Forecast threshold (0.60) is not formally calibrated; see model_design_3.md §open questions.
 """
 
 from typing import Optional
@@ -16,7 +16,7 @@ from engine.models import ChaseState
 # Tunable constants — adjust after calibration on a larger validation set
 PRE_MATCH_LOW: float = 0.40
 PRE_MATCH_HIGH: float = 0.60
-FORECAST_THRESHOLD: float = 0.55
+FORECAST_THRESHOLD: float = 0.60
 GATE_BALL: int = 60  # no in-game signals before this ball
 
 
