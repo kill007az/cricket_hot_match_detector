@@ -186,7 +186,7 @@ Input (13) → Linear(64) → ReLU → Dropout(0.15)
 
 ---
 
-## Live notification architecture (CURRENT DESIGN)
+## Live notification architecture
 
 Two signals, independent:
 
@@ -197,7 +197,58 @@ Two signals, independent:
 
 The 60-ball gate (halfway mark, over 10) suppresses early false positives from structurally close targets. The forecaster provides lead time over the reactive detector.
 
-**Not implemented yet** — this is the target architecture for the live service.
+**Implemented** — see `engine/signals.py` for logic, `engine/routes.py` for HTTP surface.
+
+---
+
+## Live service architecture
+
+The full live pipeline is deployed as four Docker Compose services:
+
+```
+Cricbuzz (unofficial JSON API)
+  → polling/cricbuzz_client.py   # rate-limited, retry + exponential backoff
+  → polling/adapter.py           # Cricbuzz items → BallEvent dicts
+  → polling/poller.py            # LivePoller (3 phases below)
+  → POST /match/{id}/ball        # engine HTTP API
+  → engine/orchestrator.py       # NN pipeline
+  → EngineOutput persisted as JSONL
+  → orchestrator/main.py         # reads JSONL, serves /matches/* endpoints
+  → ui/app.py                    # Streamlit dashboard, auto-refreshes every 10s
+```
+
+### LivePoller phases
+
+| Phase | Description |
+|---|---|
+| Phase 1 | Poll `find_live_match()` until the target match appears in Cricbuzz live listings |
+| Phase 2 | Poll inn2 commentary until first legal ball appears |
+| Phase 2.5 | One blocking fetch of completed inn1 → count legal balls + sum runs → POST /match/init |
+| Phase 3 | Continuous inn2 polling loop; send only new (unseen) legal balls; save JSONL; stop on match over |
+
+### Resilience
+
+- **Retry policy**: transient 5xx / connection errors → exponential backoff (2s → 4s → 8s ±20% jitter, max 30s), max 3 attempts
+- **Rate limiting**: 429 responses → flat 60s wait before retry
+- **Stale detection**: if no new ball received for 3 minutes → WARNING logged; 10 minutes → louder warning
+- **Resume support**: on restart, loads seen ball keys from `ball_events.jsonl` → no duplicate sends
+
+### Data persistence (`data/live_polls/{match_id}/`)
+
+| File | Content |
+|---|---|
+| `raw_inn1_{HHMMSS}.json` | Full inn1 Cricbuzz response (one-shot) |
+| `raw_inn2_{HHMMSS}.json` | Full inn2 Cricbuzz response per poll |
+| `ball_events.jsonl` | One BallEvent dict per legal delivery sent |
+| `engine_outputs.jsonl` | One EngineOutput dict per ball |
+
+### Entry points
+
+| Command | Description |
+|---|---|
+| `docker compose up --build` | Start all four services |
+| `python run.py` | Local: spawns engine subprocess + runs poller |
+| `python -m polling.run_live` | Poller only (engine must already be running) |
 
 ---
 
@@ -242,6 +293,8 @@ The 60-ball gate (halfway mark, over 10) suppresses early false positives from s
 
 - **Threshold tuning**: calibrate forecast threshold for recall-first strategy on larger validation set
 - **Feature-augmented forecaster**: if autoregressive isn't enough for edge cases, add win_prob + raw features as inputs
-- **Notification pipeline**: live data polling + Telegram/push notification wiring
-- **Live data source**: cricsheet is historical only — need live API (cricbuzz unofficial endpoints, or paid API)
+- **Notification delivery**: push notification wiring (Telegram / webhook) — currently signals are printed to console and stored in JSONL
 - **First innings signals**: currently only 2nd innings — a dominant 1st innings (e.g. 240) might be worth a heads-up
+- **Multi-match support**: poller currently targets one match; could run multiple LivePoller instances in parallel for days with concurrent IPL fixtures
+- ~~**Notification pipeline**: live data polling + engine wiring~~ — *done: polling service + engine API + Docker compose*
+- ~~**Live data source**: cricsheet is historical only~~ — *done: Cricbuzz unofficial JSON API via `polling/cricbuzz_client.py`*

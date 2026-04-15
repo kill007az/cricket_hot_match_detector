@@ -98,13 +98,6 @@ def _engine(request: Request) -> "EngineOrchestrator":  # noqa: F821
 
 @router.post("/match/init", response_model=MatchInitResponse, status_code=201)
 def init_match(body: MatchInitRequest, request: Request):
-    """
-    Initialise (or re-initialise) a match session.
-
-    Call this once before the first ball of the 2nd innings, providing the
-    innings-1 summary: target (inn1 runs + 1) and total_balls (actual legal
-    deliveries bowled in innings 1, not overs * 6).
-    """
     engine = _engine(request)
     engine.init_match(
         match_id=body.match_id,
@@ -121,13 +114,6 @@ def init_match(body: MatchInitRequest, request: Request):
 
 @router.post("/match/{match_id}/ball", response_model=EngineOutputResponse)
 def process_ball(match_id: str, body: BallEventRequest, request: Request):
-    """
-    Process one legal delivery.
-
-    The backend should send only legal deliveries (no wides, no no-balls).
-    Duplicate deliveries (same over.delivery) are safe to resend — the engine
-    returns the previous output with is_duplicate=True.
-    """
     engine = _engine(request)
     if not engine.has_match(match_id):
         raise HTTPException(
@@ -151,7 +137,6 @@ def process_ball(match_id: str, body: BallEventRequest, request: Request):
 
 @router.get("/match/{match_id}/state", response_model=MatchStateResponse)
 def get_match_state(match_id: str, request: Request):
-    """Return current chase state and latest engine output for a match."""
     engine = _engine(request)
     if not engine.has_match(match_id):
         raise HTTPException(
@@ -182,8 +167,4 @@ def get_match_state(match_id: str, request: Request):
 
 @router.get("/debug/latency")
 def debug_latency(request: Request):
-    """
-    Per-step mean latency breakdown across all processed balls.
-    Use this to identify the engine bottleneck.
-    """
     return _engine(request).get_latency_stats()

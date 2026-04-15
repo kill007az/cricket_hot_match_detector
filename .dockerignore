@@ -1,0 +1,14 @@
+.git/
+**/__pycache__/
+*.pyc
+*.pyo
+*.ipynb
+notebooks/
+data/raw/
+data/figures/
+data/dls/
+data/live_polls/
+skills/
+feature_docs/
+*.md
+.gitignore
