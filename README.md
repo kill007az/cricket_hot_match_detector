@@ -240,8 +240,8 @@ No in-game notifications before over 10. Suppresses false positives from structu
 **`balls_fraction` hardcoded to `/120`.**
 Both NNs were trained with this convention. Using `/total_balls` would mis-calibrate the models even though it looks more correct mathematically.
 
-**Inn1 smart wait.**
-At Phase 2 start the poller fetches inn1 once to count balls already bowled, then sleeps `remaining_balls × 35s` before starting to poll for inn2 (every 5 min). When inn2 starts, a second inn1 fetch counts the final ball/run totals for engine init. Legal balls are counted from actual deliveries (not `overs × 6`) to handle rain-reduced matches.
+**Inn1 smart wait (iterative).**
+Phase 2 iteratively fetches inn1, sleeps `remaining_balls × 35s`, and repeats until inn1 is complete — self-correcting any undershoot. Then polls inn2 every 5 min until it starts. Legal balls are counted from actual deliveries (not `overs × 6`) to handle rain-reduced matches.
 
 ---
 
@@ -262,7 +262,7 @@ At Phase 2 start the poller fetches inn1 once to count balls already bowled, the
 
 - Model trained on IPL data only — may mis-calibrate for other leagues
 - Engine sessions are in-memory; restarting the engine loses active match state (ball history in JSONL is not replayed)
-- Forecast threshold (0.55) is exploratory, not formally calibrated
+- Forecast threshold (0.60) is exploratory, not formally calibrated
 - No authentication on the APIs — do not expose publicly without adding auth
 - DLS (rain-reduced) matches are slightly mis-calibrated (see `balls_fraction` note above)
 

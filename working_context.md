@@ -83,8 +83,8 @@ conda run -n cricket_hot python -m tests.simulate_hot_match
 
 ### Known gaps / next steps
 
-- **Threshold calibration** — `FORECAST_THRESHOLD = 0.55` in `signals.py` is
-  from NB07 exploration, not formally tuned. Run on more matches.
+- **Threshold calibration** — `FORECAST_THRESHOLD = 0.60` in `signals.py` (raised from 0.55 after first live run).
+  Not formally calibrated. Run on more matches.
 - **Signal deduplication** — in-game signal can fire on multiple consecutive
   balls once threshold is crossed. Decide: fire-once-per-match vs fire-once-
   per-crossing.
@@ -95,3 +95,43 @@ conda run -n cricket_hot python -m tests.simulate_hot_match
 - **Persistent session store** — sessions are in-memory; restart loses state.
   Sprint 2 could add Redis or SQLite.
 - **Authentication** — no auth on the API; add before exposing publicly.
+
+---
+
+## Sprint 2 — Live polling service + first live run (2026-04-14/16)
+
+### What was built
+
+**Polling service** (`polling/`):
+- `CricbuzzClient` — Cricbuzz unofficial API client with bot-avoidance headers; new endpoint `/api/mcenter/{id}/full-commentary/{inn}` (old `/api/cricket-match/` → 404)
+- `adapter.py` — rewritten for new API field names (`legalRuns`, `totalRuns`, `overNumber`); wide/no-ball dedup by overNumber+timestamp
+- `LivePoller` — 3-phase loop; `--cb-id` required (auto-discovery endpoint gone); resume via `ball_events.jsonl`
+- `run.py` — unified local launcher (engine + poller)
+- Docker: `Dockerfile` + `docker-compose.yml` for all four services
+
+**Backlog fixes after first live run (CSK vs KKR, 2026-04-14):**
+- B2: innings end condition for loss-by-runs
+- B3: iterative smart wait (self-correcting)
+- M3: forecast threshold 0.55 → 0.60
+- U1: cumulative score column in Phase 3 table
+- U2: win%/hotness as percentages
+- P1: strategic timeout detection via commentary text
+- P2: ping-pong buffer for raw inn2 files
+- P3: super over detection + looping
+
+**Tests:** 30 unit tests in `tests/test_poller_changes.py`
+
+### Key observations from first live run
+
+- Win prob and hotness tracked match drama accurately (peak hotness 0.912 at over 8.5 when genuinely 50/50)
+- Momentum cliff at 6-ball boundary visible (backlog M1 — not yet fixed)
+- Engine restart mid-match wiped state; forecaster delayed as a result (backlog B1 — not yet fixed)
+- Win prob slightly overconfident at extreme wicket-loss scenarios (backlog M2 — not yet fixed)
+
+### Remaining backlog (group 3)
+
+- **B1** — engine restart state replay from `ball_events.jsonl`
+- **M1** — momentum smoothing (EMA instead of hard 6-ball window)
+- **M2** — win prob calibration at extremes
+- **P4** — post-match Cricsheet data collection script
+- **A1** — match analysis / debug view (scope TBD)
