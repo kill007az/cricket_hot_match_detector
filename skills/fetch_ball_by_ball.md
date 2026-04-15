@@ -3,12 +3,17 @@
 Given a match description (e.g. "KKR vs LSG IPL 2026 April 9"), this skill produces a JSON file
 in `data/raw/` ready for use in the notebooks.
 
+> **This skill is for post-match historical data retrieval only.**
+> For live match data the project uses `polling/cricbuzz_client.py`, which polls the Cricbuzz
+> unofficial JSON API in real time. Use this skill ~12 hours after a match ends to add it to the
+> training/validation set (cricsheet updates approximately weekly).
+
 ---
 
 ## Source
 
 **cricsheet.org** — free, no login, no API key. Downloads are zip files of JSON match files.
-No other source is needed. Do not attempt to scrape ESPNcricinfo or Cricbuzz — they block all requests.
+No other source needed for historical data.
 
 ---
 

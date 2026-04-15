@@ -20,7 +20,12 @@ The system is tuned for **recall over precision** — missing an exciting match 
 ## How it works
 
 ```
-Ball arrives (live feed)
+Live Cricbuzz feed  →  Polling service  →  Engine API  →  Orchestrator  →  UI
+```
+
+**Engine pipeline (per legal delivery):**
+```
+BallEvent arrives
   → ChaseState updated
   → 6 features extracted
   → Win probability (NN) computed
@@ -46,7 +51,7 @@ Both NNs were trained on **1,159 IPL matches (2008–2026)** from cricsheet.org.
 
 ```
 cricket_hot_match_detector/
-├── engine/                   # Core detection engine (pure Python, no HTTP)
+├── engine/                   # Core detection engine + HTTP layer
 │   ├── models.py             # Data structures: BallEvent, ChaseState, EngineOutput, …
 │   ├── state.py              # Per-ball state update
 │   ├── features.py           # Feature extraction for the win-prob NN
@@ -54,83 +59,145 @@ cricket_hot_match_detector/
 │   ├── hotness.py            # Hotness score formula
 │   ├── forecaster.py         # Hotness forecaster NN inference
 │   ├── signals.py            # Signal evaluation (pre-match + in-game)
-│   └── orchestrator.py       # Pipeline coordinator, in-memory sessions
+│   ├── orchestrator.py       # Pipeline coordinator, in-memory sessions
+│   ├── routes.py             # FastAPI route handlers
+│   ├── server.py             # App entry point, lifespan model loading
+│   └── README.md             # Pipeline internals, data structures, model details
 │
-├── api/                      # FastAPI HTTP layer
-│   ├── main.py               # App entry point, lifespan model loading
-│   └── routes.py             # POST /match/init, POST /match/{id}/ball, GET /match/{id}/state
+├── polling/                  # Live data polling service
+│   ├── adapter.py            # Cricbuzz items → BallEvent dicts
+│   ├── cricbuzz_client.py    # Cricbuzz API client (retry + backoff)
+│   ├── engine_client.py      # HTTP client for engine API
+│   ├── poller.py             # LivePoller: 3-phase polling loop
+│   └── run_live.py           # CLI entry for Docker / standalone polling
+│
+├── orchestrator/             # Coordination layer — single API surface for UI
+│   └── main.py               # Aggregates match history, proxies engine health
+│
+├── ui/                       # Streamlit live match dashboard
+│   └── app.py                # Auto-refreshing win prob + hotness charts
 │
 ├── tests/
 │   └── simulate_hot_match.py # Full match replay simulation (KKR vs LSG 2026)
 │
 ├── models/                   # Saved model checkpoints (binary, not re-trained here)
 ├── notebooks/                # Exploratory analysis notebooks (NB01–NB07)
-├── data/raw/                 # Cricsheet match JSONs used for validation
+├── data/
+│   ├── raw/                  # Cricsheet match JSONs used for training/validation
+│   └── live_polls/           # Per-match live data (JSONL ball events + engine outputs)
 ├── skills/                   # Session context docs (model design, analysis evolution)
-├── feature_docs/             # Sprint feature specifications
 │
+├── Dockerfile                # Single image for all services
+├── docker-compose.yml        # engine + poller + orchestrator + ui
 ├── requirements.txt
-├── working_context.md        # Running log of decisions and state — read before resuming work
-└── README.md
+├── run.py                    # Unified local launcher (engine + poller, no Docker)
+└── working_context.md        # Running log of decisions and state — read before resuming
 ```
 
 ---
 
-## Prerequisites
+## Quickstart — Docker (recommended)
 
-- Python 3.10+
-- Conda environment `cricket_hot` with PyTorch and NumPy
-- FastAPI + uvicorn (installed below)
+```bash
+docker compose up --build
+```
+
+| Service | URL |
+|---|---|
+| Engine API + Swagger | http://localhost:8000/docs |
+| Orchestrator API | http://localhost:8080/docs |
+| Live dashboard (Streamlit) | http://localhost:8501 |
+
+**`--cb-id` is required** — find the numeric Cricbuzz match ID in the match URL
+(e.g. `cricbuzz.com/live-cricket-scores/151763/...` → ID is `151763`).
+Auto-discovery is currently unavailable; see `skills/cricbuzz_api_endpoints.md`.
+
+```bash
+# docker-compose.override.yml
+services:
+  poller:
+    command: >
+      python -m polling.run_live
+      --engine-url http://engine:8000
+      --team1 CSK --team2 KKR --cb-id 151763
+```
+
+Data is persisted to `data/live_polls/{match_id}/` on the host via bind mount.
 
 ---
 
-## Installation
+## Quickstart — local (no Docker)
 
 ```bash
-# Clone and enter repo
-git clone <repo-url>
-cd cricket_hot_match_detector
-
-# Install API dependencies into the existing conda env
 conda activate cricket_hot
 pip install -r requirements.txt
+
+# --team1, --team2, and --cb-id are all required.
+# --cb-id is the numeric ID from the Cricbuzz match URL.
+python run.py --team1 CSK --team2 KKR --cb-id 151763
 ```
+
+Arguments:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--team1 / --team2` | — | Team abbreviations (e.g. CSK, KKR). **Required.** |
+| `--cb-id` | — | Cricbuzz numeric match ID from the match URL. **Required.** |
+| `--match-id` | auto-generated | Override the data folder slug |
+| `--poll-interval N` | 30 | Seconds between Cricbuzz polls **during inn2** (Phase 2 uses 5 min) |
+| `--port N` | 8000 | Engine API port |
+| `--log-level` | WARNING | DEBUG / INFO / WARNING / ERROR |
 
 ---
 
-## Running
+## Running the simulation
 
-### 1 — Start the API server
-
-```bash
-conda activate cricket_hot
-cd cricket_hot_match_detector
-uvicorn api.main:app --reload --port 8000
-```
-
-You should see:
-```
-INFO:     Application startup complete.
-```
-
-Both models are loaded at startup. The server stays running — leave this terminal open.
-
-### 2 — Run the simulation (new terminal)
+Replay a historical match ball by ball against the engine to verify the pipeline end-to-end:
 
 ```bash
 conda activate cricket_hot
-cd cricket_hot_match_detector
 python -m tests.simulate_hot_match
 ```
 
-This replays KKR vs LSG (2026-04-09) ball by ball against the live API, including:
+This replays KKR vs LSG (2026-04-09) and prints:
 - Signal detection with ball number and over
 - Overlap / idempotency test (3 balls re-sent)
 - Latency breakdown identifying the pipeline bottleneck
 
 ---
 
-## API quick reference
+## Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│ Docker Compose                                                  │
+│                                                                 │
+│   ┌──────────────┐   legal balls   ┌────────────────────────┐  │
+│   │   poller     │ ─────────────→  │   engine  :8000        │  │
+│   │              │                 │   FastAPI + NN models  │  │
+│   │  Cricbuzz    │                 └────────────┬───────────┘  │
+│   │  unofficial  │                              │               │
+│   │  JSON API    │                       EngineOutputs          │
+│   └──────────────┘                              ↓               │
+│                                    ┌────────────────────────┐  │
+│                         JSONL      │  orchestrator  :8080   │  │
+│                       ─────────→   │  reads live_polls/     │  │
+│                      (shared vol)  └────────────┬───────────┘  │
+│                                                 │               │
+│                                        HTTP API │               │
+│                                                 ↓               │
+│                                    ┌────────────────────────┐  │
+│                                    │   ui  :8501            │  │
+│                                    │   Streamlit dashboard  │  │
+│                                    └────────────────────────┘  │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+The poller and orchestrator share `data/live_polls/` via a Docker bind mount. The UI talks exclusively to the orchestrator (no direct file access, no direct engine calls).
+
+---
+
+## Engine API quick reference
 
 | Method | Endpoint | Purpose |
 |---|---|---|
@@ -141,23 +208,40 @@ This replays KKR vs LSG (2026-04-09) ball by ball against the live API, includin
 
 Full docs at `http://localhost:8000/docs` when the server is running.
 
-See [api/README.md](api/README.md) for request/response examples.
+See [engine/README.md](engine/README.md) for request/response examples and data structures.
+
+---
+
+## Orchestrator API quick reference
+
+| Method | Endpoint | Purpose |
+|---|---|---|
+| `GET` | `/health` | Liveness check |
+| `GET` | `/matches` | List all match IDs with data |
+| `GET` | `/matches/current` | Most recently active match summary |
+| `GET` | `/matches/{id}/history` | Full ball-by-ball engine outputs for a match |
+| `GET` | `/matches/{id}/signals` | Signals fired during a match |
+
+Full docs at `http://localhost:8080/docs` when running.
 
 ---
 
 ## Key design decisions
 
 **BallEvent = legal deliveries only.**
-Wides and no-balls are not sent. The backend filters them; only legal balls are POSTed. See [engine/README.md](engine/README.md) for why.
+Wides and no-balls are not sent. Only legal balls are POSTed. extras = byes + legByes only.
 
 **Idempotent ball processing.**
-Re-sending the same delivery (same `over.delivery` float) returns `is_duplicate: true` without mutating state. Safe to retry on network failures.
+Re-sending the same delivery (same `over.delivery` float) returns `is_duplicate: true` without mutating state. Safe to retry on network failures. The poller maintains a seen-set and resumes cleanly after restarts.
 
 **60-ball gate on in-game signals.**
 No in-game notifications before over 10. Suppresses false positives from structurally close targets (e.g. target 182 ≈ 50% win prob from ball 1).
 
 **`balls_fraction` hardcoded to `/120`.**
 Both NNs were trained with this convention. Using `/total_balls` would mis-calibrate the models even though it looks more correct mathematically.
+
+**Inn1 smart wait.**
+At Phase 2 start the poller fetches inn1 once to count balls already bowled, then sleeps `remaining_balls × 35s` before starting to poll for inn2 (every 5 min). When inn2 starts, a second inn1 fetch counts the final ball/run totals for engine init. Legal balls are counted from actual deliveries (not `overs × 6`) to handle rain-reduced matches.
 
 ---
 
@@ -177,9 +261,9 @@ Both NNs were trained with this convention. Using `/total_balls` would mis-calib
 ## Known limitations
 
 - Model trained on IPL data only — may mis-calibrate for other leagues
-- Sessions are in-memory; restarting the server loses all active match state
+- Engine sessions are in-memory; restarting the engine loses active match state (ball history in JSONL is not replayed)
 - Forecast threshold (0.55) is exploratory, not formally calibrated
-- No authentication on the API — do not expose publicly without adding auth
+- No authentication on the APIs — do not expose publicly without adding auth
 - DLS (rain-reduced) matches are slightly mis-calibrated (see `balls_fraction` note above)
 
 ---
@@ -187,8 +271,8 @@ Both NNs were trained with this convention. Using `/total_balls` would mis-calib
 ## Further reading
 
 - [engine/README.md](engine/README.md) — pipeline internals, data structures, model details
-- [api/README.md](api/README.md) — full endpoint reference with request/response examples
 - [tests/README.md](tests/README.md) — simulation guide and how to add new matches
 - [working_context.md](working_context.md) — running log of sprint decisions
 - [skills/analysis_evolution.md](skills/analysis_evolution.md) — how the model evolved across NB01–NB07
-- [skills/model_design_3.md](skills/model_design_3.md) — current authoritative model design reference
+- [skills/model_design_3.md](skills/model_design_3.md) — model design reference (ML / NN details)
+- [skills/fetch_ball_by_ball.md](skills/fetch_ball_by_ball.md) — post-match historical data retrieval from Cricsheet

@@ -1,0 +1,94 @@
+services:
+
+  # -------------------------------------------------------------------------
+  # Engine — FastAPI + NN models
+  # Swagger UI: http://localhost:8000/docs
+  # -------------------------------------------------------------------------
+  engine:
+    build: .
+    command: >
+      uvicorn engine.server:app
+      --host 0.0.0.0
+      --port 8000
+      --log-level info
+      --no-access-log
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./models:/app/models:ro
+      - ./data/live_polls:/app/data/live_polls
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/docs > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # Poller — fetches live Cricbuzz data and feeds the engine ball by ball
+  # Starts only after the engine passes its health check
+  # -------------------------------------------------------------------------
+  poller:
+    build: .
+    command: python -m polling.run_live --engine-url http://engine:8000
+    volumes:
+      - ./data/live_polls:/app/data/live_polls
+    depends_on:
+      engine:
+        condition: service_healthy
+    environment:
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # Orchestrator — coordination layer: aggregates match history, proxies
+  # engine status, single API surface the UI talks to
+  # Swagger UI: http://localhost:8080/docs
+  # -------------------------------------------------------------------------
+  orchestrator:
+    build: .
+    command: >
+      uvicorn orchestrator.main:app
+      --host 0.0.0.0
+      --port 8080
+      --log-level info
+      --no-access-log
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./data/live_polls:/app/data/live_polls:ro
+    depends_on:
+      engine:
+        condition: service_healthy
+    environment:
+      - ENGINE_URL=http://engine:8000
+      - PYTHONUNBUFFERED=1
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8080/health > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
+
+  # -------------------------------------------------------------------------
+  # UI — Streamlit live match dashboard
+  # Dashboard: http://localhost:8501
+  # -------------------------------------------------------------------------
+  ui:
+    build: .
+    command: >
+      streamlit run ui/app.py
+      --server.port 8501
+      --server.headless true
+      --logger.level warning
+    ports:
+      - "8501:8501"
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    environment:
+      - ORCHESTRATOR_URL=http://orchestrator:8080
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped

@@ -1,11 +1,11 @@
 """
-FastAPI application entry point.
+FastAPI application entry point for the Cricket Hot Match Engine.
 
 Models are loaded once at startup via the lifespan handler and stored on
 app.state so all routes share a single EngineOrchestrator instance.
 
 Run locally:
-    conda run -n cricket_hot uvicorn api.main:app --reload --port 8000
+    conda run -n cricket_hot uvicorn engine.server:app --reload --port 8000
 """
 
 from contextlib import asynccontextmanager
@@ -22,7 +22,6 @@ MODELS_DIR = Path(__file__).resolve().parent.parent / "models"
 async def lifespan(app: FastAPI):
     app.state.engine = EngineOrchestrator(MODELS_DIR)
     yield
-    # cleanup (nothing needed — models are in-memory)
 
 
 app = FastAPI(
@@ -31,6 +30,6 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-from api.routes import router  # noqa: E402 — must import after app is defined
+from engine.routes import router  # noqa: E402 — must import after app is defined
 
 app.include_router(router)

@@ -111,7 +111,7 @@ def main():
         session.get(f"{BASE_URL}/docs", timeout=3)
     except requests.exceptions.ConnectionError:
         print("ERROR: API server is not running.")
-        print(f"Start it with:  uvicorn api.main:app --reload --port 8000")
+        print(f"Start it with:  uvicorn engine.server:app --reload --port 8000")
         sys.exit(1)
 
     # ---- Init match ----
