@@ -25,7 +25,7 @@ The API server must be running first:
 # Terminal 1 — start server
 conda activate cricket_hot
 cd cricket_hot_match_detector
-uvicorn api.main:app --reload --port 8000
+uvicorn engine.server:app --reload --port 8000
 
 # Terminal 2 — run simulation
 conda activate cricket_hot
