@@ -74,6 +74,7 @@ services:
         condition: service_healthy
     environment:
       - ENGINE_URL=http://engine:8000
+      - BOT_URL=http://bot:8088
       - PYTHONUNBUFFERED=1
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8080/health > /dev/null"]
@@ -93,6 +94,8 @@ services:
   bot:
     build: .
     command: python -m bot.main
+    ports:
+      - "8088:8088"
     volumes:
       - ./data:/app/data
     depends_on:

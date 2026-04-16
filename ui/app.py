@@ -9,8 +9,10 @@ Auto-refreshes every REFRESH_SECS seconds.
 
 from __future__ import annotations
 
+import base64
 import os
 import time
+import uuid
 from typing import Optional
 
 import pandas as pd
@@ -37,6 +39,15 @@ st.set_page_config(
 def _get(path: str, timeout: int = 5) -> Optional[dict | list]:
     try:
         r = requests.get(f"{ORCHESTRATOR_URL}{path}", timeout=timeout)
+        r.raise_for_status()
+        return r.json()
+    except Exception:
+        return None
+
+
+def _post(path: str, body: dict, timeout: int = 60) -> Optional[dict]:
+    try:
+        r = requests.post(f"{ORCHESTRATOR_URL}{path}", json=body, timeout=timeout)
         r.raise_for_status()
         return r.json()
     except Exception:
@@ -163,24 +174,78 @@ def render_dashboard(match: dict, history: list[dict], signals: list[dict]) -> N
 
 
 # ---------------------------------------------------------------------------
+# Session state
+# ---------------------------------------------------------------------------
+
+if "session_id" not in st.session_state:
+    st.session_state.session_id = f"streamlit_{uuid.uuid4().hex[:8]}"
+
+if "chat_messages" not in st.session_state:
+    st.session_state.chat_messages = []
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
-health = fetch_health()
+tab_dash, tab_chat = st.tabs(["📊 Dashboard", "💬 Chat"])
 
-if health is None:
-    render_error("Check that the orchestrator container is running.")
-else:
-    current = fetch_current_match()
+with tab_dash:
+    health = fetch_health()
 
-    if current is None:
-        render_waiting("No active match found in the orchestrator.")
+    if health is None:
+        render_error("Check that the orchestrator container is running.")
     else:
-        match_id = current.get("match_id", "")
-        history  = fetch_history(match_id) or []
-        signals  = fetch_signals(match_id) or []
-        render_dashboard(current, history, signals)
+        current = fetch_current_match()
 
-# Auto-refresh
+        if current is None:
+            render_waiting("No active match found in the orchestrator.")
+        else:
+            match_id = current.get("match_id", "")
+            history  = fetch_history(match_id) or []
+            signals  = fetch_signals(match_id) or []
+            render_dashboard(current, history, signals)
+
+with tab_chat:
+    st.header("💬 Match Analyst")
+    st.caption("Ask anything about the live match — powered by the same agent as the Telegram bot.")
+
+    # Render history
+    for msg in st.session_state.chat_messages:
+        with st.chat_message(msg["role"]):
+            st.write(msg["content"])
+            for chart_b64 in msg.get("charts", []):
+                st.image(base64.b64decode(chart_b64))
+
+    # Input
+    if prompt := st.chat_input("Ask about the match…"):
+        st.session_state.chat_messages.append({"role": "user", "content": prompt})
+        with st.chat_message("user"):
+            st.write(prompt)
+
+        with st.chat_message("assistant"):
+            with st.spinner("Thinking…"):
+                resp = _post(
+                    "/chat",
+                    {"message": prompt, "chat_id": st.session_state.session_id},
+                    timeout=60,
+                )
+            if resp is None:
+                reply = "⚠️ Could not reach the bot agent. Is it running?"
+                charts = []
+            else:
+                reply  = resp.get("reply", "")
+                charts = resp.get("charts", [])
+
+            st.write(reply)
+            for chart_b64 in charts:
+                st.image(base64.b64decode(chart_b64))
+
+        st.session_state.chat_messages.append(
+            {"role": "assistant", "content": reply, "charts": charts}
+        )
+        st.rerun()
+
+# Auto-refresh (dashboard data only — chat state survives via session_state)
 time.sleep(REFRESH_SECS)
 st.rerun()

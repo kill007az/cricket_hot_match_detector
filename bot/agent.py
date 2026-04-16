@@ -23,6 +23,7 @@ Broken-thread recovery:
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 from typing import AsyncGenerator
 
@@ -58,6 +59,7 @@ Rules you must follow:
 # Agent with per-chat session memory
 _checkpointer = MemorySaver()
 _agent = create_react_agent(get_llm(), ALL_TOOLS, checkpointer=_checkpointer)
+_log = logging.getLogger(__name__)
 
 _BROKEN_THREAD_MARKERS = (
     "tool calls that do not have",   # LangGraph InvalidUpdateError
@@ -97,6 +99,8 @@ async def run_agent(message: str, chat_id: int) -> AsyncGenerator[str | bytes, N
         "system": _SYSTEM_PROMPT,
     }
 
+    _log.info("agent | chat=%s | request: %s", chat_id, message[:200])
+
     final_text = ""
     last_exc: Exception | None = None
     cleared_thread = False
@@ -109,6 +113,12 @@ async def run_agent(message: str, chat_id: int) -> AsyncGenerator[str | bytes, N
             ):
                 if "agent" in event:
                     for msg in event["agent"]["messages"]:
+                        # Log any tool calls the agent decided to make
+                        for tc in getattr(msg, "tool_calls", []):
+                            _log.info(
+                                "agent | chat=%s | tool_call: %s  args=%s",
+                                chat_id, tc["name"], tc.get("args", {}),
+                            )
                         if not hasattr(msg, "content"):
                             continue
                         c = msg.content
@@ -138,6 +148,7 @@ async def run_agent(message: str, chat_id: int) -> AsyncGenerator[str | bytes, N
         return
 
     if final_text:
+        _log.info("agent | chat=%s | reply: %s", chat_id, final_text[:200])
         yield final_text
 
     for png in _chart_cache.values():
