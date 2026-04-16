@@ -13,6 +13,11 @@ Endpoints
 GET /health
     Engine reachability + number of tracked matches.
 
+GET /schedule[?team=CSK]
+    Upcoming IPL 2026 fixtures from data/ipl_2026_schedule.json.
+    Filters by date >= today (IST) so today's match is always included even after it starts.
+    Optional ?team= query param filters by team abbreviation.
+
 GET /matches
     List of all match folders found in data/live_polls/.
 
@@ -25,10 +30,24 @@ GET /matches/{match_id}/history
 GET /matches/{match_id}/signals
     All signal events from the match history.
 
+GET /matches/{match_id}/ball_events
+    Raw ball-by-ball events for innings 2 (chase).
+
+GET /matches/{match_id}/ball_events_inn1
+    Raw ball-by-ball events for innings 1.
+
+GET /matches/{match_id}/scorecard/{innings_num}
+    Batting and bowling scorecard for innings 1 or 2.
+    Reads scorecard_inn{n}.json written by the poller.
+
+GET /bot/status
+    Bot subscriber count and number of alerts sent.
+
 Configuration (environment variables)
 --------------------------------------
 ENGINE_URL      URL of the engine service  (default: http://localhost:8000)
 LIVE_POLLS_DIR  Override path to live_polls (default: <project_root>/data/live_polls)
+BOT_STATE_PATH  Path to bot_state.json       (default: <project_root>/data/bot_state.json)
 """
 
 from __future__ import annotations
@@ -46,8 +65,11 @@ from fastapi import FastAPI, HTTPException
 # ---------------------------------------------------------------------------
 
 ENGINE_URL     = os.environ.get("ENGINE_URL",     "http://localhost:8000")
-_DEFAULT_POLLS = Path(__file__).resolve().parent.parent / "data" / "live_polls"
+_DEFAULT_POLLS    = Path(__file__).resolve().parent.parent / "data" / "live_polls"
+_SCHEDULE_PATH    = Path(__file__).resolve().parent.parent / "data" / "ipl_2026_schedule.json"
 LIVE_POLLS_DIR = Path(os.environ.get("LIVE_POLLS_DIR", str(_DEFAULT_POLLS)))
+_DEFAULT_BOT_STATE = Path(__file__).resolve().parent.parent / "data" / "bot_state.json"
+BOT_STATE_PATH = Path(os.environ.get("BOT_STATE_PATH", str(_DEFAULT_BOT_STATE)))
 
 app = FastAPI(
     title="Cricket Hot Match Orchestrator",
@@ -122,6 +144,28 @@ def _match_meta(match_dir: Path) -> dict:
 # Routes
 # ---------------------------------------------------------------------------
 
+@app.get("/schedule")
+def schedule(team: Optional[str] = None):
+    """
+    IPL 2026 schedule. Optionally filter by team abbreviation (e.g. ?team=CSK).
+    Returns upcoming matches only, sorted by date.
+    """
+    if not _SCHEDULE_PATH.exists():
+        raise HTTPException(status_code=404, detail="Schedule file not found.")
+    data = json.loads(_SCHEDULE_PATH.read_text(encoding="utf-8"))
+    from datetime import datetime, timezone, timedelta
+    IST = timezone(timedelta(hours=5, minutes=30))
+    today = datetime.now(IST).date()
+    matches = [
+        m for m in data.get("matches", [])
+        if datetime.fromisoformat(m["datetime_ist"]).date() >= today
+    ]
+    if team:
+        t = team.upper()
+        matches = [m for m in matches if t in (m["home_abbr"], m["away_abbr"])]
+    return {"matches": matches, "total": len(matches)}
+
+
 @app.get("/health")
 def health():
     """Engine reachability and number of tracked matches."""
@@ -186,6 +230,75 @@ def match_history(match_id: str):
             "processing_ms":   o.get("processing_ms"),
         })
     return history
+
+
+@app.get("/bot/status")
+def bot_status():
+    """
+    Bot subscriber count and recent alert fingerprints.
+    Returns empty state if bot_state.json does not exist yet.
+    """
+    if not BOT_STATE_PATH.exists():
+        return {"subscribers": 0, "alerts_sent": 0, "running": False}
+    try:
+        data = json.loads(BOT_STATE_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {"subscribers": 0, "alerts_sent": 0, "running": False}
+    return {
+        "running":       True,
+        "subscribers":   len(data.get("subscribed_chats", [])),
+        "alerts_sent":   len(data.get("seen_fps", [])),
+    }
+
+
+@app.get("/matches/{match_id}/scorecard/{innings_num}")
+def match_scorecard(match_id: str, innings_num: int):
+    """
+    Batting and bowling scorecard for a match innings.
+
+    innings_num: 1 or 2
+
+    Returns:
+        { "batting": [...], "bowling": [...] }
+    """
+    if innings_num not in (1, 2):
+        raise HTTPException(status_code=400, detail="innings_num must be 1 or 2.")
+    match_dir = LIVE_POLLS_DIR / match_id
+    if not match_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Match '{match_id}' not found.")
+    path = match_dir / f"scorecard_inn{innings_num}.json"
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"Scorecard for innings {innings_num} not available yet.")
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to read scorecard.")
+
+
+@app.get("/matches/{match_id}/ball_events_inn1")
+def match_ball_events_inn1(match_id: str):
+    """Raw ball-by-ball events for innings 1 (batting team's innings)."""
+    match_dir = LIVE_POLLS_DIR / match_id
+    if not match_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Match '{match_id}' not found.")
+    records = _read_jsonl(match_dir / "ball_events_inn1.jsonl")
+    if not records:
+        raise HTTPException(status_code=404, detail="Innings 1 data not available yet.")
+    return records
+
+
+@app.get("/matches/{match_id}/ball_events")
+def match_ball_events(match_id: str):
+    """
+    Raw ball-by-ball events for a match.
+
+    Returns a list of objects with:
+        innings, over, runs, extras, wicket
+    """
+    match_dir = LIVE_POLLS_DIR / match_id
+    if not match_dir.exists():
+        raise HTTPException(status_code=404, detail=f"Match '{match_id}' not found.")
+    return _read_jsonl(match_dir / "ball_events.jsonl")
 
 
 @app.get("/matches/{match_id}/signals")

@@ -47,7 +47,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from polling.adapter import ball_key, count_legal_balls, parse_legal_balls, sum_innings_runs
+from polling.adapter import ball_key, count_legal_balls, extract_scorecard, parse_legal_balls, sum_innings_runs
 from polling.cricbuzz_client import CricbuzzClient
 from polling.engine_client import EngineClient
 
@@ -91,8 +91,11 @@ class LivePoller:
         self._match_dir = _DATA_ROOT / match_id
         self._match_dir.mkdir(parents=True, exist_ok=True)
 
-        self._ball_events_file = self._match_dir / "ball_events.jsonl"
-        self._engine_outputs_file = self._match_dir / "engine_outputs.jsonl"
+        self._ball_events_file      = self._match_dir / "ball_events.jsonl"
+        self._ball_events_inn1_file = self._match_dir / "ball_events_inn1.jsonl"
+        self._engine_outputs_file   = self._match_dir / "engine_outputs.jsonl"
+        self._scorecard_inn1_file   = self._match_dir / "scorecard_inn1.json"
+        self._scorecard_inn2_file   = self._match_dir / "scorecard_inn2.json"
 
         # Ping-pong buffer for raw inn2 responses (avoids accumulating 200+ files)
         self._raw_inn2_paths = [
@@ -131,7 +134,7 @@ class LivePoller:
         print(f"{'─'*65}\n")
 
         self._phase1_find_match()
-        self._phase2_wait_for_inn2()
+        self._phase2_poll_inn1()
         self._phase3_poll_inn2()
 
     # ------------------------------------------------------------------
@@ -142,97 +145,113 @@ class LivePoller:
         if self._cb_id is not None:
             print(f"[Phase 1] Using provided Cricbuzz ID = {self._cb_id}\n")
             return
-        print(
-            "[Phase 1] ERROR: No Cricbuzz match ID provided and auto-discovery is unavailable.\n"
-            "          Find the numeric ID in the Cricbuzz match URL and pass --cb-id <id>."
-        )
-        raise RuntimeError("Cricbuzz match ID required — pass --cb-id")
 
-    # ------------------------------------------------------------------
-    # Phase 2: wait for 2nd innings
-    # ------------------------------------------------------------------
-
-    def _phase2_wait_for_inn2(self) -> None:
-        print("[Phase 2] Waiting for 2nd innings to start...")
-
-        # Iterative smart wait: keep re-fetching inn1 and sleeping until it's
-        # done. Self-corrects if each estimate undershoots.
-        self._smart_wait_for_inn1_complete()
-        print("[Phase 2] Smart wait done — starting inn2 poll loop...")
-
-        # Regular polling loop (handles overshoot, rain, called-off, etc.)
-        # Poll every 5 minutes here — we only need to detect inn2 starting,
-        # and missing a ball or two at the very start is acceptable.
-        _INN2_WAIT_SECS = 300
+        print(f"[Phase 1] Auto-discovering live match: {self.team1} vs {self.team2} ...")
         while True:
-            items = self._cricbuzz.get_commentary(self._cb_id, innings=2)
-            legal_balls = parse_legal_balls(items, innings=2)
-            if legal_balls:
-                print(f"[Phase 2] 2nd innings has started ({len(legal_balls)} ball(s) so far)\n")
-                self._phase25_init_from_inn1()
+            cb_id = self._cricbuzz.find_live_match(self.team1, self.team2)
+            if cb_id is not None:
+                self._cb_id = cb_id
+                print(f"[Phase 1] Found: cb_id = {self._cb_id}\n")
                 return
-            print(f"[Phase 2] Inn2 not started yet — retrying in {_INN2_WAIT_SECS}s...")
-            time.sleep(_INN2_WAIT_SECS)
+            print(f"[Phase 1] Match not live yet — retrying in {self.poll_interval}s...")
+            time.sleep(self.poll_interval)
 
-    def _smart_wait_for_inn1_complete(self) -> None:
+    # ------------------------------------------------------------------
+    # Phase 2: live inn1 polling loop
+    # ------------------------------------------------------------------
+
+    def _phase2_poll_inn1(self) -> None:
         """
-        Iteratively fetch inn1, sleep remaining_balls × 35s, repeat until
-        inn1 is complete (bowled >= _INN1_TOTAL_BALLS). Each iteration
-        re-estimates remaining time so any undershoot self-corrects.
-        Falls through immediately if inn1 is already done or on fetch error.
+        Poll innings 1 ball by ball in real time, recording every legal
+        delivery to ball_events_inn1.jsonl.
+
+        Ends when two consecutive polls return no new balls (innings over)
+        and we have seen at least 6 balls (guards against false early exit).
+        Then triggers Phase 2.5 to init the engine and moves to Phase 3.
         """
-        iteration = 0
+        print("[Phase 2] Live inn1 polling loop started\n")
+        print(
+            f"  {'Over':<6}  {'Score':>6}  {'Runs':>4}  {'Xtr':>4}  {'Wkt':>4}"
+        )
+        print(f"  {'─'*36}")
+
+        seen_inn1: set[str] = self._load_seen_keys_inn1()
+        consecutive_empty = 0
+        _EMPTY_EXIT_THRESHOLD = 2   # consecutive empty polls → inn1 done
+
         while True:
             try:
                 items = self._cricbuzz.get_commentary(self._cb_id, innings=1)
-                bowled = count_legal_balls(items)
-                remaining = max(0, _INN1_TOTAL_BALLS - bowled)
             except Exception as exc:
-                logger.warning(
-                    "Could not fetch inn1 commentary (%s) — skipping smart wait", exc
+                logger.warning("[Phase 2] Failed to fetch inn1 commentary: %s", exc)
+                time.sleep(self.poll_interval)
+                continue
+
+            legal_balls = parse_legal_balls(items, innings=1)
+            new_balls = [b for b in legal_balls if ball_key(b) not in seen_inn1]
+
+            if new_balls:
+                consecutive_empty = 0
+                for b in new_balls:
+                    bk = ball_key(b)
+                    seen_inn1.add(bk)
+                    self._append_jsonl(self._ball_events_inn1_file, b)
+                    self._print_inn1_ball(b, len(seen_inn1))
+                # Update scorecard after each batch of new balls
+                self._save_scorecard(items, self._scorecard_inn1_file)
+            else:
+                consecutive_empty += 1
+                logger.debug(
+                    "[Phase 2] No new inn1 balls (seen=%d, empty_streak=%d)",
+                    len(seen_inn1), consecutive_empty,
                 )
-                return
+                if consecutive_empty >= _EMPTY_EXIT_THRESHOLD and len(seen_inn1) >= 6:
+                    print(
+                        f"\n[Phase 2] Inn1 complete — {len(seen_inn1)} balls recorded. "
+                        f"Transitioning to Phase 2.5...\n"
+                    )
+                    self._phase25_init_from_inn1()
+                    return
 
-            if remaining == 0:
-                if iteration == 0:
-                    print(f"[Phase 2] Inn1 already complete ({bowled} balls) — polling immediately")
-                else:
-                    print(f"[Phase 2] Inn1 complete ({bowled} balls) — proceeding to inn2 poll")
-                return
-
-            secs = remaining * _BALL_DURATION_SECS
-            mins = secs / 60
-            iteration += 1
-            print(
-                f"[Phase 2] Inn1: {bowled} balls bowled, ~{remaining} remaining"
-                f" — sleeping {secs}s ({mins:.0f}m) [iteration {iteration}]"
-            )
-            time.sleep(secs)
+            time.sleep(self.poll_interval)
 
     # ------------------------------------------------------------------
-    # Phase 2.5: one-shot inn1 summary fetch → engine init
+    # Phase 2.5: derive target from inn1 data → engine init
     # ------------------------------------------------------------------
 
     def _phase25_init_from_inn1(self) -> None:
         # Skip if we already initialised this match (poller restart mid-match)
         if self._engine.is_match_known(self.match_id):
-            print("[Phase 2.5] Match already initialised in engine — skipping inn1 fetch\n")
+            print("[Phase 2.5] Match already initialised in engine — skipping\n")
             return
 
-        print("[Phase 2.5] Fetching inn1 summary (one-shot)...")
-        inn1_items = self._cricbuzz.get_commentary(self._cb_id, innings=1)
+        # Re-fetch inn1 to get authoritative run total (live data may have
+        # been slightly incomplete at the last poll tick)
+        print("[Phase 2.5] Fetching final inn1 summary for engine init...")
+        try:
+            inn1_items = self._cricbuzz.get_commentary(self._cb_id, innings=1)
+        except Exception as exc:
+            logger.warning("[Phase 2.5] Could not re-fetch inn1 (%s) — using recorded balls", exc)
+            inn1_items = None
 
-        # Persist raw inn1 response
-        ts = _timestamp()
-        raw_path = self._match_dir / f"raw_inn1_{ts}.json"
-        raw_path.write_text(json.dumps(inn1_items, ensure_ascii=False, indent=2), encoding="utf-8")
-        print(f"[Phase 2.5] Inn1 raw commentary saved → {raw_path.name}")
+        if inn1_items:
+            # Persist fresh raw inn1 response
+            ts = _timestamp()
+            raw_path = self._match_dir / f"raw_inn1_{ts}.json"
+            raw_path.write_text(json.dumps(inn1_items, ensure_ascii=False, indent=2), encoding="utf-8")
+            inn1_runs   = sum_innings_runs(inn1_items)
+            total_balls = count_legal_balls(inn1_items)
+        else:
+            # Fall back to what we already recorded
+            recorded = self._load_seen_keys_inn1()
+            total_balls = len(recorded)
+            inn1_runs = sum(
+                b.get("runs", 0) + b.get("extras", 0)
+                for b in self._read_jsonl_file(self._ball_events_inn1_file)
+            )
 
-        inn1_runs = sum_innings_runs(inn1_items)
-        total_balls = count_legal_balls(inn1_items)
         target = inn1_runs + 1
-
-        print(f"[Phase 2.5] Inn1: {inn1_runs} runs  |  {total_balls} legal balls  |  Target: {target}")
+        print(f"[Phase 2.5] Inn1: {inn1_runs} runs  |  {total_balls} balls  |  Target: {target}")
 
         result = self._engine.init_match(
             match_id=self.match_id,
@@ -240,6 +259,20 @@ class LivePoller:
             total_balls=total_balls,
         )
         print(f"[Phase 2.5] Engine init → {result.get('message', 'OK')}\n")
+
+        # Ensure inn2 has started before Phase 3
+        print("[Phase 2.5] Waiting for inn2 to start...")
+        _INN2_WAIT_SECS = 60
+        while True:
+            try:
+                items = self._cricbuzz.get_commentary(self._cb_id, innings=2)
+                if parse_legal_balls(items, innings=2):
+                    print("[Phase 2.5] Inn2 has started — moving to Phase 3\n")
+                    return
+            except Exception as exc:
+                logger.warning("[Phase 2.5] Inn2 check failed: %s", exc)
+            print(f"[Phase 2.5] Inn2 not started yet — retrying in {_INN2_WAIT_SECS}s...")
+            time.sleep(_INN2_WAIT_SECS)
 
     # ------------------------------------------------------------------
     # Phase 3: live inn2 polling loop
@@ -269,6 +302,8 @@ class LivePoller:
                 # Reset stale tracking whenever fresh data arrives
                 self._last_new_ball_time = time.monotonic()
                 self._stale_critical_fired = False
+                # Update inn2 scorecard
+                self._save_scorecard(items, self._scorecard_inn2_file)
 
                 for ball in new_balls:
                     bk = ball_key(ball)
@@ -366,6 +401,52 @@ class LivePoller:
                 "match_id=%s  seen_balls=%d",
                 elapsed / 60, self.match_id, len(self._seen),
             )
+
+    def _load_seen_keys_inn1(self) -> set[str]:
+        """Load previously recorded inn1 ball keys (resume support)."""
+        seen: set[str] = set()
+        if self._ball_events_inn1_file.exists():
+            for line in self._ball_events_inn1_file.read_text(encoding="utf-8").splitlines():
+                line = line.strip()
+                if line:
+                    try:
+                        seen.add(ball_key(json.loads(line)))
+                    except Exception:
+                        pass
+        if seen:
+            print(f"[Resume] Loaded {len(seen)} inn1 ball(s) from {self._ball_events_inn1_file.name}")
+        return seen
+
+    @staticmethod
+    def _read_jsonl_file(path: Path) -> list[dict]:
+        if not path.exists():
+            return []
+        records = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                try:
+                    records.append(json.loads(line))
+                except Exception:
+                    pass
+        return records
+
+    def _save_scorecard(self, items: list[dict], path: Path) -> None:
+        """Extract and persist batting/bowling scorecard from commentary items."""
+        try:
+            card = extract_scorecard(items)
+            path.write_text(json.dumps(card, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as exc:
+            logger.warning("Failed to save scorecard to %s: %s", path.name, exc)
+
+    @staticmethod
+    def _print_inn1_ball(ball: dict, total: int) -> None:
+        over_str = f"{int(ball['over'])}.{round((ball['over'] % 1) * 10):.0f}"
+        wkt_str  = "YES" if ball.get("wicket") else "no"
+        print(
+            f"  {over_str:<6}  {total:>6}  {ball['runs']:>4}  "
+            f"{ball.get('extras', 0):>4}  {wkt_str:>4}"
+        )
 
     def _check_engine(self) -> None:
         if not self._engine.is_alive():

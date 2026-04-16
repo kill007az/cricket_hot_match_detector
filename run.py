@@ -63,7 +63,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--team1",         default=None, help="Team 1 abbreviation (e.g. CSK). Required.")
     p.add_argument("--team2",         default=None, help="Team 2 abbreviation (e.g. KKR). Required.")
     p.add_argument("--match-id",      default=None, help="Engine match_id / data folder slug. Auto-generated if omitted.")
-    p.add_argument("--cb-id",         type=int, default=None, help="Cricbuzz numeric match ID (e.g. 151763). Find in Cricbuzz match URL. Required.")
+    p.add_argument("--cb-id",         type=int, default=None, help="Cricbuzz numeric match ID (e.g. 151763). Optional — auto-discovered if omitted.")
     p.add_argument("--poll-interval", type=int, default=30,   help="Seconds between Cricbuzz polls (default: 30)")
     p.add_argument("--port",          type=int, default=8000,  help="Engine API port (default: 8000)")
     p.add_argument(
@@ -143,13 +143,17 @@ def _resolve_match(args, engine_url: str) -> tuple[str, str, str]:
     if args.team1 and args.team2:
         team1, team2 = args.team1.upper(), args.team2.upper()
     else:
-        print(
-            "ERROR: --team1 and --team2 are required.\n"
-            "Auto-discovery is unavailable (Cricbuzz live-listing endpoint changed).\n\n"
-            "Find the match ID from the Cricbuzz URL, then run:\n"
-            "  python run.py --team1 CSK --team2 KKR --match-id csk_vs_kkr_2026-04-14\n"
-        )
-        raise SystemExit(1)
+        print("No teams specified — auto-discovering live IPL match...")
+        result = None
+        while result is None:
+            result = client.find_live_ipl_match()
+            if result is None:
+                print(f"No live IPL match found — retrying in {_DISCOVERY_RETRY_SECS}s...")
+                time.sleep(_DISCOVERY_RETRY_SECS)
+        team1, team2, discovered_cb_id = result
+        print(f"Found: {team1} vs {team2}  (cb_id={discovered_cb_id})")
+        if args.cb_id is None:
+            args.cb_id = discovered_cb_id
 
     match_id = args.match_id or f"{team1.lower()}_vs_{team2.lower()}_{date.today().isoformat()}"
     return team1, team2, match_id

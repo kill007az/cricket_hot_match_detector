@@ -41,6 +41,20 @@ Prioritised list of fixes and improvements. ✅ = implemented.
 
 ---
 
+### M4 — Momentum over-weighted in hotness formula ✅
+**Files:** `engine/hotness.py`, `notebooks/08_hotness_formula_tuning.ipynb`  
+**Problem:** Momentum multiplier (`× 5`) amplifies brief batting blitzes in lopsided matches to the same degree as genuine comebacks. In CSK vs KKR 2026-04-16 (KKR lost by 38 runs), a cluster of sixes in overs 8-9 pushed hotness to ~55% and forecast to 63% despite win prob being only ~20%. Signal fired incorrectly.  
+**Root cause:** `momentum * 5 * 0.4` contributes up to 0.26 hotness from a 0.13 win prob swing regardless of closeness. At win_prob=0.20, closeness=0.39 — the match isn't close, but momentum drowns it out.  
+**Fix options (to be evaluated in NB08 on all 6 validation matches):**
+1. Reduce the momentum multiplier (e.g. `× 3` or `× 2`)
+2. Weight momentum by closeness — `momentum × closeness` so momentum only matters when the match is close
+3. Replace point comparison with EMA (overlaps M1) for smoother decay
+4. Add a win prob gate in `signals.py` — don't fire if `win_prob < 0.25 or win_prob > 0.75`  
+**Decision (NB08):** All formula variants score 100% on 7 matches. Reducing the multiplier (×3/×2) delays KKR vs LSG signal by ~9 overs — unacceptable. Root cause was the **forecaster** amplifying a pre-gate momentum spike, not raw hotness. **Fix applied:** win prob gate `0.25–0.75` added to `engine/signals.py` — forecaster output suppressed when match is clearly one-sided. No formula change, no retraining needed.  
+**Success criteria:** CSK vs KKR 2026-04-16 fires no signal; all 3 HOT matches still fire.
+
+---
+
 ### M3 — Forecast threshold too low ✅
 **Files:** `engine/signals.py` → `FORECAST_THRESHOLD`  
 **Fix:** Changed `FORECAST_THRESHOLD` from `0.55` → `0.60`.
@@ -88,15 +102,44 @@ Prioritised list of fixes and improvements. ✅ = implemented.
 
 ---
 
-### P5 — Auto-discovery of live Cricbuzz match ID (HIGH PRIORITY)
-**Files:** `polling/cricbuzz_client.py` → `find_live_match()`, `polling/poller.py` → `_phase1_find_match()`, `polling/run_live.py`, `run.py`  
-**Problem:** The old Cricbuzz live-listing endpoint (`/api/cricket-match/live-matches`) returned 404 in April 2026. Auto-discovery was disabled; `--cb-id` is now mandatory. Users must manually find the numeric match ID from the Cricbuzz URL each time.  
-**Fix:** Capture a new HAR from `cricbuzz.com/cricket-match/live` during a live match to find the current live-listing endpoint. Once found:
-1. Update `find_live_match()` in `cricbuzz_client.py` with the new URL
-2. Restore auto-discovery loop in `_phase1_find_match()` — poll until target teams appear
-3. Make `--cb-id` optional again (falls back to auto-discovery if omitted)
-4. Update `skills/live/cricbuzz_api_endpoints.md` with the new endpoint  
-**How to find it:** Open DevTools on `cricbuzz.com/cricket-match/live` during a live match, filter XHR, look for a JSON response listing multiple live matches. Follow HAR capture steps in `skills/live/cricbuzz_api_endpoints.md`.
+### D1 — Decouple training data pipeline from recent match data (IMPORTANT)
+**Files:** `data/raw/`, `data/live_polls/`, new `scripts/convert_poll_to_cricsheet.py`  
+**Problem:** Two separate data realities exist and are currently conflated:
+
+1. **Cricsheet-style data** (`data/raw/*.json`) — standardised historical JSONs used for model training. Lagged by ~1 week after a match. Required format for NB01–NB08 and any retraining.
+2. **Live poll data** (`data/live_polls/{match_id}/`) — `ball_events.jsonl` + `engine_outputs.jsonl` written in real time. Available immediately after the match ends. Not in Cricsheet format.
+
+This means recent matches (within ~1 week) cannot be used for validation or retraining even though we have full ball-by-ball data from our own poller. NB08 (hotness tuning) cannot include CSK vs KKR 2026-04-16 until cricsheet publishes it, despite having polled every ball ourselves.
+
+**Fix — two parallel tracks:**
+
+**Track A: Poll-to-Cricsheet converter** (`scripts/convert_poll_to_cricsheet.py`)  
+Convert `ball_events.jsonl` + inn1 raw JSON into a Cricsheet-compatible JSON structure.  
+Allows immediate use of any polled match in notebooks without waiting for cricsheet.  
+Output saved to `data/raw/` using the same naming convention.  
+
+**Track B: Cricsheet auto-fetch** (`scripts/fetch_cricsheet.py`, from P4)  
+Once cricsheet publishes the match (~1 week), fetch the authoritative version and replace the converted file. Authoritative source preferred for long-term training data integrity.
+
+**Success criteria:**  
+- A match polled today can be loaded in NB08 the same day via the converter  
+- Once cricsheet publishes, the authoritative file replaces the converted one transparently  
+- Notebooks and training scripts do not need to know which source a file came from
+
+---
+
+### P6 — Smart pre-match wait for always-on service
+**Files:** `polling/run_live.py` → `_resolve_match()`, `polling/poller.py` → `_phase1_find_match()`  
+**Problem:** Auto-discovery currently polls every 60s unconditionally. Fine for manual use, but as a 24/7 service this wastes requests during the 20+ hours per day when no match is live. Also two separate retry intervals exist (`_DISCOVERY_RETRY_SECS=60` in `run_live.py`, `poll_interval` in the poller) that should be unified.  
+**Fix:** Pull the IPL schedule (Cricbuzz or a static fixture list) and sleep until ~15 min before the next scheduled match start. Fall back to polling only in the pre-match window. Unify discovery retry interval into a single configurable value.  
+**Why:** When running as a Docker service that restarts after each match, the poller hammers Cricbuzz all night for no reason — risks rate-limiting and wastes resources.
+
+---
+
+### P5 — Auto-discovery of live Cricbuzz match ID ✅
+**Files:** `polling/cricbuzz_client.py` → `_fetch_live_matches()`, `find_live_match()`, `find_live_ipl_match()`; `polling/poller.py` → `_phase1_find_match()`; `polling/run_live.py`  
+**Problem:** The old Cricbuzz live-listing JSON API (`/api/cricket-match/live-matches`) returned 404 in April 2026.  
+**Fix:** HTML scrape of `https://www.cricbuzz.com/live-cricket-scores`. Match URLs in the HTML follow `/live-cricket-scores/{cb_id}/{team1}-vs-{team2}-{rest}` — regex extracts cb_id and team slugs directly. No HAR needed. `--cb-id`, `--team1`, `--team2` are all optional; `run_live.py` with no arguments auto-discovers any live IPL match.
 
 ---
 

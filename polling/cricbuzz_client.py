@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 from typing import Optional
 
@@ -184,37 +185,133 @@ class CricbuzzClient:
     # Match discovery
     # ------------------------------------------------------------------
 
-    def find_live_match(self, team1: str, team2: str) -> Optional[int]:
-        """
-        Auto-discovery of a live match by team names.
+    # ------------------------------------------------------------------
+    # Internal: live match discovery via HTML scraping
+    # ------------------------------------------------------------------
 
-        NOTE: The Cricbuzz live-listing endpoint has changed.  This method
-        currently always returns None.  Pass --match-id explicitly instead
-        (the numeric ID appears in the Cricbuzz match URL, e.g. 151763).
+    _LIVE_SCORES_URL = "https://www.cricbuzz.com/cricket-match/live-scores"
+
+    # Matches the anchor tag containing a match link, capturing title and href.
+    # title="Team1 vs Team2, Nth Match - <status>" href="/live-cricket-scores/{id}/{slug}"
+    _MATCH_ANCHOR_RE = re.compile(
+        r'title="([^"]+?)\s+-\s+([^"]+?)"\s+href="/live-cricket-scores/(\d+)/([a-z0-9-]+)"'
+    )
+
+    # Status strings that mean the match has not yet started or is already over.
+    # Anything else (score strings, "In Progress", etc.) is considered live.
+    _NOT_LIVE_STATUSES = ("preview", "won", "lost", "drawn", "tied", "abandoned", "no result")
+
+    def _fetch_live_matches(self) -> list[tuple[int, str, str]]:
         """
-        logger.warning(
-            "find_live_match: live-listing endpoint unavailable. "
-            "Pass --match-id <id> explicitly (check the Cricbuzz match URL)."
-        )
-        return None
+        Scrape the Cricbuzz live scores page and return a list of
+        (cb_id, team1_slug, team2_slug) for every match that is currently
+        in progress (i.e. not a preview and not completed).
+
+        team1_slug / team2_slug are the raw slug tokens, e.g. "csk", "kkr".
+        """
+        url = self._LIVE_SCORES_URL
+        try:
+            resp = self._get_with_retry(url)
+        except Exception as exc:
+            logger.warning("Failed to fetch live scores page: %s", exc)
+            return []
+
+        seen: set[int] = set()
+        results: list[tuple[int, str, str]] = []
+
+        for _title, status, cb_id_str, slug in self._MATCH_ANCHOR_RE.findall(resp.text):
+            cb_id = int(cb_id_str)
+            if cb_id in seen:
+                continue
+            seen.add(cb_id)
+
+            status_lower = status.strip().lower()
+            if any(s in status_lower for s in self._NOT_LIVE_STATUSES):
+                logger.debug(
+                    "Skipping cb_id=%s (status: %s)", cb_id, status.strip()
+                )
+                continue
+
+            # slug format: "{t1}-vs-{t2}-{rest}"
+            parts = slug.split("-vs-", 1)
+            if len(parts) != 2:
+                continue
+            team1_slug = parts[0]
+            team2_slug = parts[1].split("-")[0]
+            results.append((cb_id, team1_slug, team2_slug))
+            logger.debug(
+                "Found live match: cb_id=%s  %s vs %s  (status: %s)",
+                cb_id, team1_slug, team2_slug, status.strip(),
+            )
+
+        return results
 
     @staticmethod
     def _matches_any(name: str, aliases: list[str]) -> bool:
         name_lower = name.lower()
         return any(a.lower() in name_lower or name_lower in a.lower() for a in aliases)
 
+    @staticmethod
+    def _slug_to_abbr(slug: str) -> str:
+        """
+        Map a URL slug token (e.g. 'csk', 'lsg') to a known abbreviation,
+        or return the slug uppercased if no match found.
+        """
+        slug_upper = slug.upper()
+        # Direct match first (most slugs are already the abbreviation)
+        if slug_upper in TEAM_ALIASES:
+            return slug_upper
+        # Fallback: check if slug appears in any alias
+        for abbr, aliases in TEAM_ALIASES.items():
+            if any(slug.lower() in a.lower() for a in aliases):
+                return abbr
+        return slug_upper
+
+    def find_live_match(self, team1: str, team2: str) -> Optional[int]:
+        """
+        Find a live match for the given team abbreviations.
+        Returns the Cricbuzz cb_id or None if not found.
+        """
+        t1_aliases = [team1.upper()] + _aliases(team1)
+        t2_aliases = [team2.upper()] + _aliases(team2)
+
+        for cb_id, t1_slug, t2_slug in self._fetch_live_matches():
+            t1_abbr = self._slug_to_abbr(t1_slug)
+            t2_abbr = self._slug_to_abbr(t2_slug)
+            t1_match = (
+                self._matches_any(t1_slug, t1_aliases)
+                or self._matches_any(t1_abbr, t1_aliases)
+            )
+            t2_match = (
+                self._matches_any(t2_slug, t2_aliases)
+                or self._matches_any(t2_abbr, t2_aliases)
+            )
+            if t1_match and t2_match:
+                logger.info("Found match: %s vs %s  cb_id=%s", team1, team2, cb_id)
+                return cb_id
+
+        logger.debug("No live match found for %s vs %s", team1, team2)
+        return None
+
     def find_live_ipl_match(self) -> Optional[tuple[str, str, int]]:
         """
-        Auto-discovery of a live IPL match.
-
-        NOTE: The Cricbuzz live-listing endpoint has changed.  This method
-        currently always returns None.  Pass --match-id explicitly instead
-        (the numeric ID appears in the Cricbuzz match URL, e.g. 151763).
+        Auto-discover any live IPL match.
+        Returns (team1_abbr, team2_abbr, cb_id) or None if no IPL match is live.
         """
-        logger.warning(
-            "find_live_ipl_match: live-listing endpoint unavailable. "
-            "Pass --match-id <id> explicitly (check the Cricbuzz match URL)."
-        )
+        for cb_id, t1_slug, t2_slug in self._fetch_live_matches():
+            slug = f"{t1_slug}-vs-{t2_slug}"
+            # Check if this looks like an IPL match via the full slug in the page
+            # We re-check by fetching the page again — instead, filter via slug length
+            # heuristic: IPL team slugs are short (csk, kkr, mi, rcb, etc.)
+            t1_abbr = self._slug_to_abbr(t1_slug)
+            t2_abbr = self._slug_to_abbr(t2_slug)
+            if t1_abbr in TEAM_ALIASES and t2_abbr in TEAM_ALIASES:
+                logger.info(
+                    "Found live IPL match: %s vs %s  cb_id=%s", t1_abbr, t2_abbr, cb_id
+                )
+                return t1_abbr, t2_abbr, cb_id
+
+        logger.debug("No live IPL match found")
         return None
 
     # ------------------------------------------------------------------

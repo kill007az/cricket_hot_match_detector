@@ -54,3 +54,6 @@ logs/
 
 # API runtime
 uvicorn.pid
+
+# Bot runtime state
+data/bot_state.json

@@ -15,12 +15,16 @@ Two signals are generated per match:
 
 The system is tuned for **recall over precision** — missing an exciting match is worse than a false alert.
 
+Signals are delivered via a **Telegram bot** that also answers natural-language questions about the match and serves live charts on demand.
+
 ---
 
 ## How it works
 
 ```
 Live Cricbuzz feed  →  Polling service  →  Engine API  →  Orchestrator  →  UI
+                                                                 ↓
+                                                            Telegram Bot
 ```
 
 **Engine pipeline (per legal delivery):**
@@ -65,14 +69,24 @@ cricket_hot_match_detector/
 │   └── README.md             # Pipeline internals, data structures, model details
 │
 ├── polling/                  # Live data polling service
-│   ├── adapter.py            # Cricbuzz items → BallEvent dicts
+│   ├── adapter.py            # Cricbuzz items → BallEvent dicts + scorecard extraction
 │   ├── cricbuzz_client.py    # Cricbuzz API client (retry + backoff)
 │   ├── engine_client.py      # HTTP client for engine API
-│   ├── poller.py             # LivePoller: 3-phase polling loop
+│   ├── poller.py             # LivePoller: inn1 + inn2 live polling loops
+│   ├── schedule.py           # IPL 2026 schedule reader — smart wait helpers
 │   └── run_live.py           # CLI entry for Docker / standalone polling
 │
-├── orchestrator/             # Coordination layer — single API surface for UI
+├── orchestrator/             # Coordination layer — single API surface for UI + bot
 │   └── main.py               # Aggregates match history, proxies engine health
+│
+├── bot/                      # Telegram chatbot + LangGraph ReAct agent
+│   ├── main.py               # PTB Application, command handlers, entry point
+│   ├── agent.py              # LangGraph ReAct agent with per-chat session memory
+│   ├── tools.py              # 14 LangChain tools calling orchestrator API
+│   ├── charts.py             # Matplotlib chart generation → PNG bytes
+│   ├── alert_loop.py         # Background asyncio loop — proactive + lifecycle alerts
+│   ├── llm.py                # LLM factory (Gemini Flash, configurable via env)
+│   └── state.py              # Persistent state (subscribed chats, seen fingerprints)
 │
 ├── ui/                       # Streamlit live match dashboard
 │   └── app.py                # Auto-refreshing win prob + hotness charts
@@ -84,11 +98,13 @@ cricket_hot_match_detector/
 ├── notebooks/                # Exploratory analysis notebooks (NB01–NB07)
 ├── data/
 │   ├── raw/                  # Cricsheet match JSONs used for training/validation
+│   ├── ipl_2026_schedule.json  # Full IPL 2026 fixture list (M1–M70)
 │   └── live_polls/           # Per-match live data (JSONL ball events + engine outputs)
 ├── skills/                   # Session context docs (model design, analysis evolution)
 │
+├── .env.example              # Template for TELEGRAM_TOKEN, GOOGLE_API_KEY, etc.
 ├── Dockerfile                # Single image for all services
-├── docker-compose.yml        # engine + poller + orchestrator + ui
+├── docker-compose.yml        # engine + poller + orchestrator + ui + bot
 ├── requirements.txt
 ├── run.py                    # Unified local launcher (engine + poller, no Docker)
 └── working_context.md        # Running log of decisions and state — read before resuming
@@ -98,28 +114,89 @@ cricket_hot_match_detector/
 
 ## Quickstart — Docker (recommended)
 
+### First-time setup
+
+**1. Create the live polls directory** (required before first run — Docker bind mount will fail without it):
+
 ```bash
-docker compose up --build
+mkdir data/live_polls
 ```
 
-| Service | URL |
+> **Windows note:** If your project path contains spaces (e.g. `Personal Projects/`), Docker Desktop may
+> fail to create the directory automatically. Always create `data/live_polls` manually before running.
+
+**2. Create a `.env` file** (copy from `.env.example`):
+
+```
+# Required for the Telegram bot
+TELEGRAM_TOKEN=your_telegram_bot_token_here
+GOOGLE_API_KEY=your_google_api_key_here
+
+# Optional — pin a specific match (auto-discovered if omitted)
+# TEAM1=CSK
+# TEAM2=KKR
+# CB_ID=151763
+```
+
+Get a `TELEGRAM_TOKEN` from [@BotFather](https://t.me/BotFather).
+Get a `GOOGLE_API_KEY` from [Google AI Studio](https://aistudio.google.com/) (free tier works).
+
+If `TEAM1`/`TEAM2` are omitted, the poller auto-discovers any live IPL match by scraping
+`cricbuzz.com/cricket-match/live-scores`. `CB_ID` is optional — find it in the match URL
+(`cricbuzz.com/live-cricket-scores/151763/...` → `151763`) to skip discovery entirely.
+
+**3. Start all services:**
+
+```bash
+docker compose up --build -d
+```
+
+`-d` runs containers in the background (detached). To stream logs after:
+
+```bash
+docker compose logs -f           # all services
+docker compose logs -f poller    # one service
+```
+
+| Service | URL / access |
 |---|---|
 | Engine API + Swagger | http://localhost:8000/docs |
 | Orchestrator API | http://localhost:8080/docs |
 | Live dashboard (Streamlit) | http://localhost:8501 |
+| Telegram bot | Message your bot on Telegram; send `/start` to subscribe to alerts |
 
-**`--cb-id` is required** — find the numeric Cricbuzz match ID in the match URL
-(e.g. `cricbuzz.com/live-cricket-scores/151763/...` → ID is `151763`).
-Auto-discovery is currently unavailable; see `skills/live/cricbuzz_api_endpoints.md`.
+### Starting a new match
+
+No rebuild needed. Restart the engine and poller — the poller will auto-discover the new match:
 
 ```bash
-# docker-compose.override.yml
-services:
-  poller:
-    command: >
-      python -m polling.run_live
-      --engine-url http://engine:8000
-      --team1 CSK --team2 KKR --cb-id 151763
+docker compose restart engine
+docker compose up -d --no-build poller
+```
+
+To pin a specific fixture, update `.env` with `TEAM1`, `TEAM2` (and optionally `CB_ID`) before restarting.
+
+The engine must be restarted to clear its in-memory match session from the previous match.
+The orchestrator and UI keep running untouched.
+
+### Replaying a match from scratch
+
+If the poller was restarted mid-match and you want to re-process all balls:
+
+```bash
+rm data/live_polls/<match_id>/ball_events.jsonl
+docker compose restart engine
+docker compose up -d --no-build poller
+```
+
+The poller uses `ball_events.jsonl` as its seen-set. Deleting it forces a full replay from Cricbuzz.
+The engine must also be restarted — otherwise it still holds the previous session in memory and
+will return duplicates for every ball.
+
+### Stopping
+
+```bash
+docker compose down
 ```
 
 Data is persisted to `data/live_polls/{match_id}/` on the host via bind mount.
@@ -132,8 +209,13 @@ Data is persisted to `data/live_polls/{match_id}/` on the host via bind mount.
 conda activate cricket_hot
 pip install -r requirements.txt
 
-# --team1, --team2, and --cb-id are all required.
-# --cb-id is the numeric ID from the Cricbuzz match URL.
+# No args — auto-discovers any live IPL match
+python run.py
+
+# Pin a specific match
+python run.py --team1 CSK --team2 KKR
+
+# Override Cricbuzz ID (skip discovery)
 python run.py --team1 CSK --team2 KKR --cb-id 151763
 ```
 
@@ -141,8 +223,8 @@ Arguments:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--team1 / --team2` | — | Team abbreviations (e.g. CSK, KKR). **Required.** |
-| `--cb-id` | — | Cricbuzz numeric match ID from the match URL. **Required.** |
+| `--team1 / --team2` | auto-discovered | Team abbreviations (e.g. CSK, KKR). Optional — auto-detected from Cricbuzz if omitted. |
+| `--cb-id` | auto-discovered | Cricbuzz numeric match ID. Optional — found from match URL if omitted. |
 | `--match-id` | auto-generated | Override the data folder slug |
 | `--poll-interval N` | 30 | Seconds between Cricbuzz polls **during inn2** (Phase 2 uses 5 min) |
 | `--port N` | 8000 | Engine API port |
@@ -169,31 +251,93 @@ This replays KKR vs LSG (2026-04-09) and prints:
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│ Docker Compose                                                  │
-│                                                                 │
-│   ┌──────────────┐   legal balls   ┌────────────────────────┐  │
-│   │   poller     │ ─────────────→  │   engine  :8000        │  │
-│   │              │                 │   FastAPI + NN models  │  │
-│   │  Cricbuzz    │                 └────────────┬───────────┘  │
-│   │  unofficial  │                              │               │
-│   │  JSON API    │                       EngineOutputs          │
-│   └──────────────┘                              ↓               │
-│                                    ┌────────────────────────┐  │
-│                         JSONL      │  orchestrator  :8080   │  │
-│                       ─────────→   │  reads live_polls/     │  │
-│                      (shared vol)  └────────────┬───────────┘  │
-│                                                 │               │
-│                                        HTTP API │               │
-│                                                 ↓               │
-│                                    ┌────────────────────────┐  │
-│                                    │   ui  :8501            │  │
-│                                    │   Streamlit dashboard  │  │
-│                                    └────────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│ Docker Compose                                                       │
+│                                                                      │
+│   ┌──────────────┐   legal balls   ┌────────────────────────┐       │
+│   │   poller     │ ─────────────→  │   engine  :8000        │       │
+│   │              │                 │   FastAPI + NN models  │       │
+│   │  Cricbuzz    │                 └────────────┬───────────┘       │
+│   │  HTML scrape │                              │                    │
+│   │  + JSON API  │                       EngineOutputs               │
+│   └──────────────┘                              ↓                    │
+│                                    ┌────────────────────────┐       │
+│                         JSONL      │  orchestrator  :8080   │       │
+│                       ─────────→   │  reads live_polls/     │       │
+│                      (shared vol)  └──────────┬─────────────┘       │
+│                                               │                      │
+│                                      HTTP API │                      │
+│                              ┌────────────────┴──────────────┐      │
+│                              ↓                                ↓      │
+│                ┌─────────────────────┐     ┌───────────────────┐    │
+│                │   ui  :8501         │     │   bot             │    │
+│                │   Streamlit dash    │     │   Telegram alerts │    │
+│                └─────────────────────┘     │   + LLM agent     │    │
+│                                            └───────────────────┘    │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 The poller and orchestrator share `data/live_polls/` via a Docker bind mount. The UI talks exclusively to the orchestrator (no direct file access, no direct engine calls).
+
+---
+
+## Telegram bot
+
+The bot is a personal notifier and match analyst. It does not require any setup beyond `/start`.
+
+### Commands
+
+| Command | Description |
+|---|---|
+| `/start` | Subscribe to match alerts |
+| `/stop` | Unsubscribe |
+| `/status` | Live scoreboard: both innings scores, win%, hotness, forecast |
+| `/chart winprob` | Win probability chart |
+| `/chart hotness` | Hotness chart |
+| `/chart forecast` | Hotness + forecast overlay |
+| `/signals` | All signals fired this match |
+| `/turning` | Top 5 win probability turning points |
+| `/balls [n]` | Last N balls table (default 20) |
+| `/matches` | List all recorded matches |
+| Free text | Ask anything — answered by Gemini Flash via LangGraph ReAct agent with session memory |
+
+### Alerts
+
+Six lifecycle and hotness alerts per match (once each, never duplicated after restart):
+
+| Alert | Trigger |
+|---|---|
+| 🏏 **INN1_STARTED** | First ball of innings 1 recorded |
+| 📊 **INN1_ENDED** | Innings 1 complete, innings 2 about to start |
+| 🎯 **INN2_STARTED** | First ball of the chase recorded |
+| 📢 **PRE_MATCH** | Ball 1 win probability is 40–60% — structurally even chase |
+| 🔥 **IN_GAME** | Hotness forecaster crosses threshold after over 10 |
+| 🏆 **MATCH_ENDED** | Match over (target reached / all out / balls exhausted) |
+
+Lifecycle alerts (INN1_STARTED, INN1_ENDED, INN2_STARTED, MATCH_ENDED) are written by Gemini Flash for natural-language summaries, with template fallbacks if the LLM is unavailable.
+
+Alert state is persisted to `data/bot_state.json` — restarts do not re-send old alerts.
+
+### Agent tools
+
+The free-text agent has 14 tools:
+
+| Tool | Purpose |
+|---|---|
+| `get_match_status` | Live scoreboard for both innings |
+| `get_win_prob_curve` | Win probability chart |
+| `get_hotness_curve` | Hotness chart |
+| `get_forecast_overlay` | Hotness + forecast overlay chart |
+| `get_signal_timeline` | Signals fired this match |
+| `get_key_turning_points` | Top N win prob swing moments |
+| `get_ball_by_ball_table` | Last N balls table |
+| `get_match_scorecard` | Over-by-over scorecard (inn1 or inn2) |
+| `get_batting_summary` | Aggregates: sixes, fours, run rate, extras |
+| `get_batting_card` | Per-batter: runs, balls, 4s, 6s, SR |
+| `get_bowling_card` | Per-bowler: overs, runs, wkts, economy |
+| `run_python` | Execute Python against match data for custom analysis |
+| `list_matches` | All recorded matches |
+| `get_schedule` | Upcoming IPL 2026 fixtures (optionally filtered by team) |
 
 ---
 
@@ -216,11 +360,16 @@ See [engine/README.md](engine/README.md) for request/response examples and data 
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `GET` | `/health` | Liveness check |
-| `GET` | `/matches` | List all match IDs with data |
-| `GET` | `/matches/current` | Most recently active match summary |
-| `GET` | `/matches/{id}/history` | Full ball-by-ball engine outputs for a match |
+| `GET` | `/health` | Liveness check + engine reachability |
+| `GET` | `/schedule` | Upcoming IPL 2026 fixtures (`?team=CSK` to filter) |
+| `GET` | `/matches` | List all match IDs with metadata |
+| `GET` | `/matches/current` | Most recently active match + latest engine state |
+| `GET` | `/matches/{id}/history` | Full ball-by-ball engine outputs (inn2) |
 | `GET` | `/matches/{id}/signals` | Signals fired during a match |
+| `GET` | `/matches/{id}/ball_events` | Raw ball-by-ball events for inn2 |
+| `GET` | `/matches/{id}/ball_events_inn1` | Raw ball-by-ball events for inn1 |
+| `GET` | `/matches/{id}/scorecard/{1\|2}` | Batting + bowling scorecard for an innings |
+| `GET` | `/bot/status` | Bot subscriber count and alert fingerprints |
 
 Full docs at `http://localhost:8080/docs` when running.
 
@@ -240,8 +389,11 @@ No in-game notifications before over 10. Suppresses false positives from structu
 **`balls_fraction` hardcoded to `/120`.**
 Both NNs were trained with this convention. Using `/total_balls` would mis-calibrate the models even though it looks more correct mathematically.
 
-**Inn1 smart wait (iterative).**
-Phase 2 iteratively fetches inn1, sleeps `remaining_balls × 35s`, and repeats until inn1 is complete — self-correcting any undershoot. Then polls inn2 every 5 min until it starts. Legal balls are counted from actual deliveries (not `overs × 6`) to handle rain-reduced matches.
+**Full-match polling.**
+The poller records both innings. Phase 1 live-polls inn1 ball-by-ball (5s interval), saving to `ball_events_inn1.jsonl` and `scorecard_inn1.json`. Phase 2 detects inn2 start via the Cricbuzz match state and switches to chase polling. This enables the bot to answer inn1 questions ("who scored?", "batting card?") and fire accurate lifecycle alerts.
+
+**Schedule-aware smart wait.**
+On startup, the poller reads `data/ipl_2026_schedule.json` to find the next IPL match and sleeps until 15 minutes before the scheduled start time. Sleeping is done in 5-minute chunks so PC wake-from-sleep doesn't miss the window. If no schedule data is available, falls back to 60s retry.
 
 ---
 
@@ -261,16 +413,19 @@ Phase 2 iteratively fetches inn1, sleeps `remaining_balls × 35s`, and repeats u
 ## Known limitations
 
 - Model trained on IPL data only — may mis-calibrate for other leagues
-- Engine sessions are in-memory; restarting the engine loses active match state (ball history in JSONL is not replayed)
+- Engine sessions are in-memory; restarting the engine loses active match state (ball history in JSONL is not replayed — backlog B1)
 - Forecast threshold (0.60) is exploratory, not formally calibrated
 - No authentication on the APIs — do not expose publicly without adding auth
 - DLS (rain-reduced) matches are slightly mis-calibrated (see `balls_fraction` note above)
+- Bot is single-user by design — no multi-user auth; anyone with the bot link can subscribe
+- Agent session memory (MemorySaver) is in-process only — lost on container restart
 
 ---
 
 ## Further reading
 
 - [engine/README.md](engine/README.md) — pipeline internals, data structures, model details
+- [bot/README.md](bot/README.md) — Telegram bot user guide and setup
 - [tests/README.md](tests/README.md) — simulation guide and how to add new matches
 - [working_context.md](working_context.md) — running log of sprint decisions
 - [skills/model/analysis_evolution.md](skills/model/analysis_evolution.md) — how the model evolved across NB01–NB07
