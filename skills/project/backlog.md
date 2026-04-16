@@ -34,10 +34,17 @@ Prioritised list of fixes and improvements. ✅ = implemented.
 
 ---
 
-### M2 — Win prob overconfident at extremes
-**Files:** `engine/win_prob.py` (inference), or retrain  
-**Problem:** At 6 wickets down needing 80+ off remaining balls, model outputs ~0.05–0.07 instead of ~0.01–0.02. Likely symmetric (too high floor AND too high ceiling).  
-**Fix:** Temperature scaling on model output, or output clipping at extremes. Alternatively retrain with better representation of late-wicket / blowout scenarios.
+### M2 — Win prob overconfident at extremes ✅
+**Files:** `engine/win_prob.py`, `notebooks/09_win_prob_bce_experiment.ipynb`  
+**Problem:** At 6 wickets down needing 80+ off remaining balls, model outputs ~0.05–0.07 instead of ~0.01–0.02.  
+**Root cause:** NB03 trained with MSE on smoothed empirical bin averages. Sparse tail bins get pulled toward neighbours during smoothing — model learns the smoothed average (~0.05) instead of the true frequency (~0.01).  
+**Fix:** Retrained with `BCEWithLogitsLoss` on raw `chaser_won` (0/1) labels — no binning, no smoothing. BCE penalises every prediction that isn't extreme enough, pushing tail states to their true frequency.  
+**Changes:**
+- `notebooks/09_win_prob_bce_experiment.ipynb` — experiment, comparison, reliability diagram
+- `engine/win_prob.py` — removed Sigmoid from `_WinProbNet`; `predict()` applies `torch.sigmoid()` on logit
+- `models/win_prob_nn.pt` — replaced with BCE checkpoint (old MSE model backed up as `win_prob_nn_mse_nb03.pt`)
+- `tests/test_win_prob_bce.py` — validation: HOT signals preserved, COLD silent, tail ≤ 0.05
+**Result:** Tail states (6+wk, 60+rn) push to ~0.001–0.003 vs ~0.05–0.07 before. Mid-range curves unchanged.
 
 ---
 

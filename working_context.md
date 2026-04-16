@@ -276,3 +276,36 @@ Last signal: match heating up — tune in now
 - Inn2 score: sums `ball_events` live; uses `scorecard/2` team_total when innings is complete
 - Helper `_overs_str(balls)` converts ball count to "X.Y ov" format
 - Result indicator: shows "{team} won by N runs" or "{team} won" when match ends
+
+---
+
+## M2 fix — BCE win probability model (2026-04-16)
+
+### Problem
+NB03 model trained with MSE on smoothed empirical bin averages. At extreme tail states (6+ wickets down, 80+ runs needed), sparse bins get smoothed toward neighbours → model outputs ~0.05–0.07 where true rate is ~0.01–0.02.
+
+### Fix
+Retrained same architecture with `BCEWithLogitsLoss` on raw `chaser_won` (0/1) labels (NB09). BCE learns true win frequency directly from outcomes, bypassing bin averaging entirely.
+
+**Data cleaning added:**
+- Filter `balls_remaining <= 0` (end-of-match states causing `rrr` div-by-zero)
+- Clip `rrr` to [0, 6] (extreme last-ball states were producing normalised values of 61 → NaN gradients)
+
+**Architecture change:** Sigmoid removed from `_WinProbNet`; model outputs raw logit. `predict()` applies `torch.sigmoid()` manually. This is the correct pattern for `BCEWithLogitsLoss` (numerically stable, avoids boundary errors).
+
+**Result:** Tail states (6+wk, 60+rn, ≤30br) push to 0.001–0.003 vs 0.05–0.07 before. Mid-range curves visually identical to NB03 on all 4 validation matches.
+
+### Files changed
+- `notebooks/09_win_prob_bce_experiment.ipynb` — full experiment
+- `engine/win_prob.py` — no Sigmoid in model, sigmoid in predict()
+- `models/win_prob_nn.pt` — replaced with BCE checkpoint
+- `models/win_prob_nn_mse_nb03.pt` — backup of old MSE model
+- `tests/test_win_prob_bce.py` — validation test (16/16 passing)
+
+### Remaining backlog
+- **B1** — engine restart state replay
+- **M1** — momentum smoothing
+- **P4** — Cricsheet auto-fetch script
+- **P6** — smart pre-match wait
+- **D1** — poll-to-Cricsheet converter
+- **A1** — match analysis / debug view
