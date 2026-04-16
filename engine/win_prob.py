@@ -1,11 +1,14 @@
 """
 WinProbModel: thin wrapper around the saved win_prob_nn.pt checkpoint.
 
-Architecture (from NB03):
+Architecture (from NB09 — BCE training):
   Input(6) → Linear(64) → ReLU → Dropout(0.1)
            → Linear(32) → ReLU → Dropout(0.1)
            → Linear(16) → ReLU → Dropout(0.1)
-           → Linear(1)  → Sigmoid
+           → Linear(1)  [raw logit — sigmoid applied in predict()]
+
+Trained with BCEWithLogitsLoss on raw chaser_won labels (not smoothed bin averages).
+Replaces NB03 MSE model — better calibrated at tail states (M2 fix).
 """
 
 from pathlib import Path
@@ -23,7 +26,7 @@ class _WinProbNet(nn.Module):
         for h in hidden_dims:
             layers += [nn.Linear(prev, h), nn.ReLU(), nn.Dropout(0.1)]
             prev = h
-        layers += [nn.Linear(prev, 1), nn.Sigmoid()]
+        layers += [nn.Linear(prev, 1)]  # no Sigmoid — logit output
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -57,4 +60,5 @@ class WinProbModel:
         x_norm = (x - self._mean) / self._std
         tensor = torch.tensor(x_norm, dtype=torch.float32)
         with torch.no_grad():
-            return float(self._net(tensor).item())
+            logit = self._net(tensor)
+            return float(torch.sigmoid(logit).item())

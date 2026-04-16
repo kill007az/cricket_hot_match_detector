@@ -67,8 +67,14 @@ Better but still symmetric — doesn't capture that wickets matter more in death
 ### v3: Empirical lookup (nb02)
 Built from 1,184 IPL matches. Bin → observed win rate. Jagged/noisy due to sparse bins; applied Savitzky-Golay smoothing.
 
-### v4: Neural Network (nb03 — current, saved to models/)
+### v4: Neural Network — MSE (nb03, superseded)
 Trained to fit the empirical bin win rates as soft regression targets. Smooth by construction.
+Backed up as `models/win_prob_nn_mse_nb03.pt`.
+
+### v5: Neural Network — BCE (nb09 — current, saved to models/)
+Same architecture as v4 but trained with `BCEWithLogitsLoss` on raw `chaser_won` (0/1) labels.
+No binning, no smoothing. Better calibrated at tail states (M2 fix).
+Sigmoid removed from model; applied manually in `predict()` after getting logit.
 
 ---
 
@@ -78,13 +84,14 @@ Trained to fit the empirical bin win rates as soft regression targets. Smooth by
 Input (6) → Linear(64) → ReLU → Dropout(0.1)
           → Linear(32) → ReLU → Dropout(0.1)
           → Linear(16) → ReLU → Dropout(0.1)
-          → Linear(1)  → Sigmoid
+          → Linear(1)  [logit — sigmoid applied in predict()]
 ```
 
 - **Parameters**: 3,073
-- **Loss**: MSE against empirical bin win rates (soft labels, not raw 0/1)
+- **Loss**: `BCEWithLogitsLoss` on raw `chaser_won` (0/1) labels (NB09). Previous: MSE on soft bin averages (NB03).
 - **Optimiser**: Adam, lr=1e-3, 50 epochs, batch 512, 85/15 split
 - **Input normalisation**: z-score per feature (mean/std saved in checkpoint)
+- **Data cleaning**: rows with `balls_remaining <= 0` dropped; `rrr` clipped to [0, 6]
 
 **Saved artifacts**:
 - `models/win_prob_nn.pt` — weights + architecture config + normalisation stats
