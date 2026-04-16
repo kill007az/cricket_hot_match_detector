@@ -47,6 +47,7 @@ def fetch_health()         -> Optional[dict]: return _get("/health")
 def fetch_current_match()  -> Optional[dict]: return _get("/matches/current")
 def fetch_history(match_id: str) -> Optional[list]: return _get(f"/matches/{match_id}/history")
 def fetch_signals(match_id: str) -> Optional[list]: return _get(f"/matches/{match_id}/signals")
+def fetch_bot_status()     -> Optional[dict]: return _get("/bot/status")
 
 # ---------------------------------------------------------------------------
 # Data helpers
@@ -142,12 +143,23 @@ def render_dashboard(match: dict, history: list[dict], signals: list[dict]) -> N
         health = fetch_health()
         if health:
             engine_ok = health.get("engine_reachable", False)
-            st.metric("Engine",       "✅ up" if engine_ok else "❌ down")
+            st.metric("Engine",          "✅ up" if engine_ok else "❌ down")
             st.metric("Matches tracked", health.get("matches_tracked", 0))
         else:
             st.warning("Orchestrator not reachable")
         st.caption(f"Orchestrator: `{ORCHESTRATOR_URL}`")
         st.caption(f"Match: `{match_id}`")
+
+        st.divider()
+        st.header("🤖 Telegram Bot")
+        bot = fetch_bot_status()
+        if bot and bot.get("running"):
+            st.metric("Subscribers",  bot.get("subscribers", 0))
+            st.metric("Alerts sent",  bot.get("alerts_sent", 0))
+        elif bot:
+            st.caption("Bot not started yet — no state file found.")
+        else:
+            st.caption("Bot status unavailable.")
 
 
 # ---------------------------------------------------------------------------

@@ -38,6 +38,12 @@ requirements.txt
 working_context.md  (this file)
 ```
 
+### Post-sprint refactor — `bot/llm.py`
+
+Extracted LLM construction out of `agent.py` into a dedicated `bot/llm.py` factory (`get_llm()`). Single place to configure model name, temperature, and API key. `agent.py` calls `get_llm()` — no LLM details hardcoded there. Swapping models only requires changing `llm.py`.
+
+---
+
 ### Key design decisions
 
 1. **BallEvent = legal delivery only.**
@@ -135,3 +141,138 @@ conda run -n cricket_hot python -m tests.simulate_hot_match
 - **M2** — win prob calibration at extremes
 - **P4** — post-match Cricsheet data collection script
 - **A1** — match analysis / debug view (scope TBD)
+
+---
+
+## Sprint 3 — Telegram bot + LangGraph agent (2026-04-16)
+
+### What was built
+
+**P5 — Auto-discovery of live Cricbuzz match ID:**
+- `CricbuzzClient._fetch_live_matches()` — scrapes `cricbuzz.com/cricket-match/live-scores` HTML, extracts `(cb_id, team1_slug, team2_slug)` via regex, filters by status string in `title` attribute (skips "Preview" and "X won")
+- `find_live_match(team1, team2)` and `find_live_ipl_match()` restored and working
+- `_phase1_find_match()` in poller restored — polls every `poll_interval` seconds until match appears
+- `run_live.py` and `run.py` — all args optional; no args = fully automatic
+- `docker-compose.yml` — `CB_ID`/`TEAM1`/`TEAM2` optional via `${VAR:+--flag $VAR}` syntax
+- **P6 added to backlog** — smart pre-match wait for always-on service (currently polls every 60s regardless of schedule)
+
+**Telegram bot (`bot/`):**
+- `state.py` — loads/saves `data/bot_state.json`; `subscribed_chats` + `seen_fps` (capped at 1000 entries)
+- `charts.py` — `win_prob_chart`, `hotness_chart`, `forecast_overlay_chart` → PNG bytes via matplotlib Agg backend
+- `tools.py` — 8 LangChain `@tool` functions (sync, requests-based); chart tools deposit PNG bytes in `_chart_cache` side-channel
+- `agent.py` — `run_agent()` async generator; LangGraph `create_react_agent` with Gemini Flash; yields `str` (text) and `bytes` (charts) interleaved
+- `alert_loop.py` — asyncio background coroutine; polls `/matches/current` every 30s; fires PRE_MATCH (ball 1, wp 40–60%) and IN_GAME alerts once per fingerprint per match
+- `main.py` — PTB v21 Application; all command handlers; free-text → agent; alert loop started via `post_init` hook
+
+**Infrastructure:**
+- `requirements.txt` — added `python-telegram-bot==21.5`, `langgraph>=0.2.28`, `langchain-google-genai>=2.0.0`, `langchain-core>=0.3.0`
+- `docker-compose.yml` — new `bot` service; depends on orchestrator healthcheck; mounts `./data`
+- `.env.example` — `TELEGRAM_TOKEN`, `GOOGLE_API_KEY`, optional `TEAM1`/`TEAM2`/`CB_ID`
+
+### Key design decisions
+
+1. **Chart side-channel (`_chart_cache`).** LangGraph ToolMessages must have string content. Chart tools store PNG bytes in a module-level dict and return a text description. `agent.py` drains the cache after streaming and yields the bytes. Command handlers call tools directly and drain the cache themselves.
+
+2. **Sync tools in async context.** All 8 tools use synchronous `requests.get`. `asyncio.to_thread` wraps them in command handlers. LangGraph wraps them automatically when called from `astream`.
+
+3. **Alert fingerprint = `{match_id}:{signal_text}`.** One alert per match per signal text, persisted across restarts. PRE_MATCH fingerprint = `{match_id}:PRE_MATCH`.
+
+4. **`post_init` hook for alert loop.** PTB v21 pattern — `asyncio.create_task(alert_loop(app))` inside the `post_init` coroutine ensures the task is created inside the running event loop.
+
+5. **Single-user design.** No auth — bot is a personal notifier. Anyone with the bot link can `/start` and receive alerts. Acceptable for personal use; noted in Known Limitations.
+
+### Remaining backlog
+
+- **B1** — engine restart state replay
+- **M1** — momentum smoothing
+- **M2** — win prob calibration
+- **P4** — Cricsheet auto-fetch script
+- **P6** — smart pre-match wait (schedule-aware discovery)
+- **D1** — poll-to-Cricsheet converter
+- **A1** — match analysis / debug view
+
+---
+
+## Post-Sprint 3 improvements (2026-04-16)
+
+### Bot agent upgrades
+
+**Session memory:**
+- `agent.py` — `MemorySaver` checkpointer keyed by `chat_id` (LangGraph `thread_id`). Each Telegram chat gets its own conversation thread. Follow-up messages ("Sure", "4", "that one") now work correctly.
+- `run_agent(message, chat_id)` — signature extended; `main.py` passes `update.effective_chat.id`.
+
+**Retry / backoff:**
+- `agent.py` — 3-attempt exponential backoff (2s, 4s, 8s + jitter) on `_agent.astream()`. Handles Gemini 429 / 503 transient errors silently.
+
+**LLM model config:**
+- `bot/llm.py` — model name driven by `GEMINI_MODEL` env var (default `gemini-2.0-flash`). Change model without rebuilding by updating `.env`.
+- `bot/llm.py` — content-block response format handled: `msg.content` may be `str` or `list[{type, text, ...}]`; both parsed correctly in `agent.py`.
+
+**New tools (13 total, was 8):**
+- `get_match_scorecard(innings)` — over-by-over runs/wickets/boundaries table
+- `get_batting_summary(innings)` — aggregate totals: sixes, fours, dots, extras, run rate
+- `get_batting_card(innings)` — per-batter: runs, balls, 4s, 6s, SR (from live scorecard JSON)
+- `get_bowling_card(innings)` — per-bowler: overs, runs, wkts, economy, wides, no-balls
+- `run_python(code)` — executes arbitrary Python with `history`, `ball_events`, `ball_events_inn1` pre-loaded; stdout returned as string
+
+**System prompt hardened:** never ask clarifying questions, use defaults, assume current match, prefer `run_python` for analytical questions, both innings available.
+
+### Full-match polling (inn1 + inn2)
+
+**`polling/poller.py` — Phase 2 rewritten:**
+- Old: smart sleep estimate → one-shot inn1 fetch at Phase 2.5
+- New: **live inn1 polling loop** — polls every `poll_interval` seconds, records every legal delivery to `ball_events_inn1.jsonl` in real time
+- Inn1 end detection: 2 consecutive empty polls with ≥6 balls seen
+- Inn2 wait moved into Phase 2.5 (60s retry loop until first inn2 ball appears)
+- Resume support: `_load_seen_keys_inn1()` reads existing `ball_events_inn1.jsonl` on restart
+
+**Scorecard extraction (`polling/adapter.py`):**
+- `extract_scorecard(items)` — derives batting + bowling cards from raw Cricbuzz commentary items
+- Per-batter: name, runs, balls, 4s, 6s, SR, dots (from `batsmanStriker` fields)
+- Per-bowler: name, overs, runs, wkts, maidens, wides, no-balls, economy (from `bowlerStriker` fields)
+- Strategy: keep highest `batBalls`/`bowlOvs` entry per player ID across all commentary items
+
+**Scorecard persistence:**
+- `scorecard_inn1.json` / `scorecard_inn2.json` — written after every poll with new balls; always current
+
+**New data files per match:**
+
+| File | Contents |
+|---|---|
+| `ball_events_inn1.jsonl` | Inn1 legal deliveries: innings, over, runs, extras, wicket |
+| `scorecard_inn1.json` | Inn1 batting + bowling cards |
+| `scorecard_inn2.json` | Inn2 batting + bowling cards |
+
+### New orchestrator endpoints
+
+| Endpoint | Description |
+|---|---|
+| `GET /matches/{id}/ball_events` | Inn2 ball-by-ball |
+| `GET /matches/{id}/ball_events_inn1` | Inn1 ball-by-ball |
+| `GET /matches/{id}/scorecard/{1 or 2}` | Batting + bowling card for innings |
+
+### Logging fix
+- `bot/main.py` — logging level raised to `INFO` so PTB startup messages and agent activity are visible in `docker compose logs bot`.
+
+### Score accuracy fix
+- Root cause: `ball_events.jsonl` stores only legal deliveries — wide/no-ball runs were excluded, understating scores by ~5–11 runs per innings.
+- Fix: `extract_scorecard()` in `adapter.py` now calls `sum_innings_runs(items)` to compute the true team total (includes all delivery types) and stores it as `team_total` in `scorecard_inn*.json`.
+- `get_batting_summary` reads `team_total` from the scorecard endpoint as the authoritative total; falls back to summing ball_events if scorecard unavailable.
+
+### `get_match_status` — live scoreboard
+Rewritten to show a full live scoreboard instead of just "need X off Y":
+
+```
+🏏 CSK vs KKR
+CSK: 192/5 (20 ov)           ← inn1 score from scorecard_inn1.json
+KKR: 144/7 (18.2 ov)         ← inn2 score from ball_events (live) or scorecard_inn2.json
+Need 49 off 11 balls          ← chase summary
+Win prob: 87.3%  |  Hotness: 0.6%
+Forecast: 72.1%
+Last signal: match heating up — tune in now
+```
+
+- Inn1 score: reads `team_total` + wicket count from `GET /matches/{id}/scorecard/1`
+- Inn2 score: sums `ball_events` live; uses `scorecard/2` team_total when innings is complete
+- Helper `_overs_str(balls)` converts ball count to "X.Y ov" format
+- Result indicator: shows "{team} won by N runs" or "{team} won" when match ends

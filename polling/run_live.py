@@ -30,8 +30,10 @@ from datetime import date
 
 from polling.cricbuzz_client import CricbuzzClient
 from polling.poller import LivePoller
+from polling.schedule import find_next_ipl_match, find_next_match, format_match, seconds_until_match
 
-_DISCOVERY_RETRY_SECS = 60   # how long to wait between auto-discovery retries
+_DISCOVERY_RETRY_SECS = 60   # fallback retry when no schedule data available
+_PRE_MATCH_BUFFER_MINS = 15  # wake up this many minutes before scheduled start
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -102,17 +104,41 @@ def _resolve_match(args) -> tuple[str, str, str]:
     if args.team1 and args.team2:
         team1, team2 = args.team1.upper(), args.team2.upper()
     else:
-        # Auto-discover any live IPL match
-        print("No teams specified — auto-discovering live IPL match...")
+        # --- Schedule-aware smart wait ---
+        t1 = args.team1.upper() if args.team1 else None
+        t2 = args.team2.upper() if args.team2 else None
+        next_match = find_next_match(t1, t2) if (t1 and t2) else find_next_ipl_match()
+
+        if next_match:
+            secs = seconds_until_match(next_match, pre_buffer_mins=_PRE_MATCH_BUFFER_MINS)
+            if secs > 60:
+                print(f"Next match: {format_match(next_match)}")
+                print(
+                    f"Sleeping until {_PRE_MATCH_BUFFER_MINS} min before start "
+                    f"({secs/3600:.1f}h from now)..."
+                )
+                # Sleep in 5-minute chunks so PC wake-from-sleep doesn't throw off timing
+                while True:
+                    remaining = seconds_until_match(next_match, pre_buffer_mins=_PRE_MATCH_BUFFER_MINS)
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(300, remaining))
+                print("Waking up — starting live discovery loop...")
+            else:
+                print(f"Next match starting soon: {format_match(next_match)}")
+        else:
+            print("No schedule data — falling back to 60s retry loop.")
+
+        # Live discovery loop (runs once match window is near)
+        print("Auto-discovering live IPL match...")
         result = None
         while result is None:
             result = client.find_live_ipl_match()
             if result is None:
-                print(f"No live IPL match found — retrying in {_DISCOVERY_RETRY_SECS}s...")
+                print(f"Not live yet — retrying in {_DISCOVERY_RETRY_SECS}s...")
                 time.sleep(_DISCOVERY_RETRY_SECS)
         team1, team2, discovered_cb_id = result
         print(f"Found: {team1} vs {team2}  (cb_id={discovered_cb_id})")
-        # If --cb-id was not explicitly provided, use the discovered one
         if args.cb_id is None:
             args.cb_id = discovered_cb_id
 

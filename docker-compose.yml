@@ -41,7 +41,7 @@ services:
       ${TEAM2:+--team2 $TEAM2}
       ${CB_ID:+--cb-id $CB_ID}
     volumes:
-      - ./data/live_polls:/app/data/live_polls
+      - ./data:/app/data
     depends_on:
       engine:
         condition: service_healthy
@@ -68,7 +68,7 @@ services:
     ports:
       - "8080:8080"
     volumes:
-      - ./data/live_polls:/app/data/live_polls:ro
+      - ./data:/app/data:ro
     depends_on:
       engine:
         condition: service_healthy
@@ -87,6 +87,25 @@ services:
   # UI — Streamlit live match dashboard
   # Dashboard: http://localhost:8501
   # -------------------------------------------------------------------------
+  # -------------------------------------------------------------------------
+  # Bot — Telegram chatbot + LangGraph ReAct agent
+  # -------------------------------------------------------------------------
+  bot:
+    build: .
+    command: python -m bot.main
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      orchestrator:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      - ORCHESTRATOR_URL=http://orchestrator:8080
+      - BOT_STATE_PATH=/app/data/bot_state.json
+      - PYTHONUNBUFFERED=1
+    restart: unless-stopped
+
   ui:
     build: .
     command: >

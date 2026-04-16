@@ -39,3 +39,9 @@ PyYAML==6.0.3
 click==8.3.2
 typing_extensions==4.15.0
 tzdata==2026.1
+
+# --- bot ---
+python-telegram-bot==21.5
+langgraph>=0.2.28
+langchain-google-genai>=2.0.0
+langchain-core>=0.3.0

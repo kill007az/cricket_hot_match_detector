@@ -111,6 +111,87 @@ def sum_innings_runs(items: list[dict]) -> int:
     return total
 
 
+def extract_scorecard(items: list[dict]) -> dict:
+    """
+    Extract batting and bowling scorecards from raw Cricbuzz commentary items.
+
+    Returns:
+        {
+          "batting": [
+            { "name", "runs", "balls", "fours", "sixes", "strike_rate", "dots" }
+            ...  ordered by batId appearance
+          ],
+          "bowling": [
+            { "name", "overs", "runs", "wickets", "maidens", "wides", "noballs", "economy" }
+            ...  ordered by bowlId appearance
+          ]
+        }
+
+    Strategy: for each batsman/bowler, keep the item with the highest ball count
+    (most recent stats). Ignores placeholder entries with empty names or id == 0.
+    """
+    batters: dict[int, dict] = {}
+    bowlers: dict[int, dict] = {}
+    batter_order: list[int] = []
+    bowler_order: list[int] = []
+
+    for item in items:
+        bs = item.get("batsmanStriker") or {}
+        bat_id = bs.get("batId", 0)
+        if bat_id and bs.get("batName"):
+            prev = batters.get(bat_id)
+            if prev is None or bs.get("batBalls", 0) >= prev.get("batBalls", 0):
+                batters[bat_id] = bs
+            if bat_id not in batter_order:
+                batter_order.append(bat_id)
+
+        bw = item.get("bowlerStriker") or {}
+        bowl_id = bw.get("bowlId", 0)
+        if bowl_id and bw.get("bowlName"):
+            prev = bowlers.get(bowl_id)
+            if prev is None or bw.get("bowlOvs", 0) >= prev.get("bowlOvs", 0):
+                bowlers[bowl_id] = bw
+            if bowl_id not in bowler_order:
+                bowler_order.append(bowl_id)
+
+    batting = [
+        {
+            "name":         batters[bid]["batName"],
+            "runs":         batters[bid].get("batRuns", 0),
+            "balls":        batters[bid].get("batBalls", 0),
+            "fours":        batters[bid].get("batFours", 0),
+            "sixes":        batters[bid].get("batSixes", 0),
+            "strike_rate":  batters[bid].get("batStrikeRate", 0.0),
+            "dots":         batters[bid].get("batDots", 0),
+        }
+        for bid in batter_order if bid in batters
+    ]
+
+    bowling = [
+        {
+            "name":     bowlers[bid]["bowlName"],
+            "overs":    bowlers[bid].get("bowlOvs", 0),
+            "runs":     bowlers[bid].get("bowlRuns", 0),
+            "wickets":  bowlers[bid].get("bowlWkts", 0),
+            "maidens":  bowlers[bid].get("bowlMaidens", 0),
+            "wides":    bowlers[bid].get("bowlWides", 0),
+            "noballs":  bowlers[bid].get("bowlNoballs", 0),
+            "economy":  bowlers[bid].get("bowlEcon", 0.0),
+        }
+        for bid in bowler_order if bid in bowlers
+    ]
+
+    # True team total includes wides/no-ball runs that aren't in ball_events
+    team_total = sum_innings_runs(items)
+    wickets    = sum(1 for b in batting if b["balls"] > 0)  # approximate from batters seen
+
+    return {
+        "batting":    batting,
+        "bowling":    bowling,
+        "team_total": team_total,
+    }
+
+
 def ball_key(ball: dict) -> str:
     """
     Unique string key for a BallEvent dict.  Mirrors BallEvent.ball_key in
