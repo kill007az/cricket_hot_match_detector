@@ -15,6 +15,7 @@ import time
 import uuid
 from typing import Optional
 
+import altair as alt
 import pandas as pd
 import requests
 import streamlit as st
@@ -59,6 +60,7 @@ def fetch_current_match()  -> Optional[dict]: return _get("/matches/current")
 def fetch_history(match_id: str) -> Optional[list]: return _get(f"/matches/{match_id}/history")
 def fetch_signals(match_id: str) -> Optional[list]: return _get(f"/matches/{match_id}/signals")
 def fetch_bot_status()     -> Optional[dict]: return _get("/bot/status")
+def fetch_scorecard(match_id: str, innings: int) -> Optional[dict]: return _get(f"/matches/{match_id}/scorecard/{innings}")
 
 # ---------------------------------------------------------------------------
 # Data helpers
@@ -88,6 +90,31 @@ def render_error(detail: str) -> None:
     st.error(f"Cannot reach orchestrator at `{ORCHESTRATOR_URL}`\n\n{detail}")
 
 
+def render_inn1(match: dict) -> None:
+    """Dashboard view while innings 1 is in progress."""
+    team1    = match.get("team1", "?")
+    team2    = match.get("team2", "?")
+    date     = match.get("date", "")
+    inn1     = match.get("inn1_summary", {})
+
+    st.title(f"🏏 {team1} vs {team2}")
+    st.caption(f"{date}  ·  1st innings in progress  ·  auto-refreshes every {REFRESH_SECS}s")
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Score",  f"{inn1.get('runs', 0)} / {inn1.get('wickets', 0)}")
+    col2.metric("Overs",  inn1.get("overs", "0.0"))
+    col3.metric("Balls",  inn1.get("balls", 0))
+
+    st.info(f"Watching {team1} bat — engine analysis begins when {team2} starts their chase.")
+
+    with st.sidebar:
+        st.header("System")
+        health = fetch_health()
+        if health:
+            st.metric("Engine", "✅ up" if health.get("engine_reachable") else "❌ down")
+        st.caption(f"Match: `{match.get('match_id', '')}`")
+
+
 def render_dashboard(match: dict, history: list[dict], signals: list[dict]) -> None:
     last = match.get("last_state", {})
     match_id = match.get("match_id", "")
@@ -95,18 +122,33 @@ def render_dashboard(match: dict, history: list[dict], signals: list[dict]) -> N
     team2    = match.get("team2", "?")
     date     = match.get("date", "")
     balls    = match.get("balls_seen", len(history))
+    inn1     = match.get("inn1_summary", {})
 
     # --- Header ---
     st.title(f"🏏 {team1} vs {team2}")
     st.caption(f"{date}  ·  {balls} balls  ·  auto-refreshes every {REFRESH_SECS}s")
 
+    # Inn2 live score — prefer scorecard team_total (includes wides/no-balls)
+    inn2_wkts  = last.get("wickets", 0)
+    sc2        = fetch_scorecard(match_id, 2)
+    inn2_runs  = (sc2.get("team_total") or 0) if sc2 else None
+    if not inn2_runs:
+        # fallback: target - runs_needed
+        engine_state = match.get("engine_state", {})
+        inn2_runs = engine_state.get("runs_scored") or (
+            (engine_state.get("target", 0) - last.get("runs_needed", 0)) or None
+        )
+    inn2_score = f"{inn2_runs} / {inn2_wkts}" if inn2_runs is not None else "—"
+
     # --- Key metrics ---
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Runs Needed",     last.get("runs_needed",    "—"))
-    col2.metric("Wickets",         f"{last.get('wickets', 0)} / 10")
-    col3.metric("Balls Remaining", last.get("balls_remaining","—"))
-    col4.metric("Win Probability", f"{last.get('win_prob', 0):.1%}" if last else "—")
-    col5.metric("Hotness",         f"{last.get('hotness', 0):.3f}" if last else "—")
+    col1, col2, col3, col4, col5, col6, col7 = st.columns(7)
+    col1.metric("Inn1 Score",      f"{inn1.get('runs', '—')} / {inn1.get('wickets', '—')}")
+    col2.metric("Inn2 Score",      inn2_score)
+    col3.metric("Runs Needed",     last.get("runs_needed",    "—"))
+    col4.metric("Balls Remaining", last.get("balls_remaining","—"))
+    col5.metric("Win Probability", f"{last.get('win_prob', 0):.1%}" if last else "—")
+    col6.metric("Hotness",         f"{last.get('hotness', 0):.3f}" if last else "—")
+    col7.metric("Forecast",        f"{last.get('forecast', 0):.1%}" if last.get('forecast') else "—")
 
     st.divider()
 
@@ -121,19 +163,33 @@ def render_dashboard(match: dict, history: list[dict], signals: list[dict]) -> N
 
     with col_left:
         st.subheader("Win Probability")
-        st.line_chart(
-            df[["win_prob"]],
-            y_label="Win Probability",
-            color=["#1f77b4"],
+        wp_df = df[["win_prob"]].reset_index()
+        chart = (
+            alt.Chart(wp_df)
+            .mark_line(color="#1f77b4")
+            .encode(
+                x=alt.X("ball:Q", title="Ball"),
+                y=alt.Y("win_prob:Q", title="Win Probability", scale=alt.Scale(domain=[0, 1])),
+            )
         )
+        st.altair_chart(chart, use_container_width=True)
 
     with col_right:
         st.subheader("Hotness + Forecast")
-        st.line_chart(
-            df[["hotness", "forecast"]],
-            y_label="Score",
-            color=["#d62728", "#ff7f0e"],
+        hf_df = df[["hotness", "forecast"]].reset_index().melt("ball", var_name="metric", value_name="value")
+        chart = (
+            alt.Chart(hf_df)
+            .mark_line()
+            .encode(
+                x=alt.X("ball:Q", title="Ball"),
+                y=alt.Y("value:Q", title="Score", scale=alt.Scale(domain=[0, 1])),
+                color=alt.Color("metric:N", scale=alt.Scale(
+                    domain=["hotness", "forecast"],
+                    range=["#d62728", "#ff7f0e"],
+                )),
+            )
         )
+        st.altair_chart(chart, use_container_width=True)
 
     st.divider()
 
@@ -200,6 +256,8 @@ with tab_dash:
 
         if current is None:
             render_waiting("No active match found in the orchestrator.")
+        elif current.get("phase") == "inn1":
+            render_inn1(current)
         else:
             match_id = current.get("match_id", "")
             history  = fetch_history(match_id) or []

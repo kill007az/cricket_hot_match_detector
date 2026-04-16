@@ -7,9 +7,8 @@ Reads data/ipl_2026_schedule.json and provides:
   - seconds_until_match(match)     → seconds until match start IST
   - format_match(match)            → human-readable one-liner
 
-"Upcoming" is defined as date >= today (IST) so today's match is always returned
-even after its scheduled start time. This ensures the poller wakes up correctly
-when started during an ongoing match.
+"Upcoming" is defined as datetime > now (IST) — only matches that haven't started yet.
+Mid-match restarts are handled by find_live_ipl_match() in run_live.py, not the schedule.
 """
 
 from __future__ import annotations
@@ -47,7 +46,7 @@ def _load() -> list[dict]:
 
 def _is_upcoming(match: dict) -> bool:
     start = datetime.fromisoformat(match["datetime_ist"])
-    return start.date() >= datetime.now(_IST).date()
+    return start > datetime.now(_IST)
 
 
 def _matches_teams(match: dict, team1: str, team2: str) -> bool:

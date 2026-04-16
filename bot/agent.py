@@ -31,13 +31,15 @@ from langchain_core.messages import HumanMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.prebuilt import create_react_agent
 
+import requests as _requests
+
 from bot.llm import get_llm
-from bot.tools import ALL_TOOLS, _chart_cache
+from bot.tools import ALL_TOOLS, ORCHESTRATOR_URL, _chart_cache
 
 _MAX_RETRIES = 3
 _BASE_DELAY  = 2.0   # seconds
 
-_SYSTEM_PROMPT = """You are a cricket match analyst for a live IPL match detector.
+_SYSTEM_PROMPT_BASE = """You are a cricket match analyst for a live IPL match detector.
 You have tools to fetch live match data, generate charts, analyse ball-by-ball history,
 and run arbitrary Python code against match data.
 
@@ -54,7 +56,50 @@ Rules you must follow:
 - Both innings are tracked. Use innings=1 for first innings, innings=2 (default) for the chase.
 - For "who scored" / "batting card" / "bowling figures" questions use get_batting_card or get_bowling_card with the appropriate innings.
 - For inn1 stats questions use get_batting_summary(innings=1), get_match_scorecard(innings=1), or run_python with ball_events_inn1.
-- If no match is active, say so clearly and stop."""
+- If no match is active, say so clearly and stop.
+- Questions about "who is batting", "who got out", "current batters" refer to the CURRENT innings only.
+  For innings 1 context (completed), clearly label it as "in the first innings".
+  Never mix up who is currently batting with who batted in the first innings."""
+
+
+def _build_system_prompt() -> str:
+    """Inject live match context so the LLM knows which innings is active."""
+    try:
+        data = _requests.get(f"{ORCHESTRATOR_URL}/matches/current", timeout=3).json()
+        team1  = data.get("team1", "?")
+        team2  = data.get("team2", "?")
+        phase  = data.get("phase", "unknown")
+        inn1   = data.get("inn1_summary", {})
+
+        if phase == "inn1":
+            context = (
+                f"\n\nMATCH CONTEXT: {team1} vs {team2}. "
+                f"Currently in INNINGS 1 — {team1} are BATTING. "
+                f"Score so far: {inn1.get('runs', 0)}/{inn1.get('wickets', 0)} "
+                f"in {inn1.get('overs', '0.0')} overs. "
+                f"Innings 2 has NOT started yet. "
+                f"Questions about 'current batters' refer to {team1}'s innings."
+            )
+        elif phase == "inn2":
+            last  = data.get("last_state", {})
+            rr    = last.get("runs_needed", "?")
+            wk    = last.get("wickets", 0)
+            br    = last.get("balls_remaining", "?")
+            context = (
+                f"\n\nMATCH CONTEXT: {team1} vs {team2}. "
+                f"Currently in INNINGS 2 — {team2} are CHASING. "
+                f"{team1} batted first (innings 1 is COMPLETE). "
+                f"Inn1 final: {inn1.get('runs', '?')}/{inn1.get('wickets', '?')} "
+                f"in {inn1.get('overs', '?')} overs. "
+                f"Chase: {team2} need {rr} off {br} balls, {wk} wickets down. "
+                f"Questions about 'current batters' or 'who got out' refer to {team2}'s chase UNLESS the user says 'first innings'."
+            )
+        else:
+            context = f"\n\nMATCH CONTEXT: {team1} vs {team2}. Match not yet started."
+    except Exception:
+        context = ""
+
+    return _SYSTEM_PROMPT_BASE + context
 
 # Agent with per-chat session memory
 _checkpointer = MemorySaver()
@@ -96,7 +141,7 @@ async def run_agent(message: str, chat_id: int) -> AsyncGenerator[str | bytes, N
     thread_id = str(chat_id)
     config = {
         "configurable": {"thread_id": thread_id},
-        "system": _SYSTEM_PROMPT,
+        "system": _build_system_prompt(),
     }
 
     _log.info("agent | chat=%s | request: %s", chat_id, message[:200])

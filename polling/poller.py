@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sys
 import time
 from datetime import datetime
@@ -165,9 +166,13 @@ class LivePoller:
         Poll innings 1 ball by ball in real time, recording every legal
         delivery to ball_events_inn1.jsonl.
 
-        Ends when two consecutive polls return no new balls (innings over)
-        and we have seen at least 6 balls (guards against false early exit).
-        Then triggers Phase 2.5 to init the engine and moves to Phase 3.
+        Inn1 is considered complete when either:
+          - 10 wickets have fallen, OR
+          - the last ball seen belongs to the final over (over integer == max_overs)
+            and its ball-within-over digit is 6.
+
+        max_overs starts at 20 (standard T20) but is updated downward if DLS/
+        rain-reduction commentary is detected (e.g. "revised to 15 overs").
         """
         print("[Phase 2] Live inn1 polling loop started\n")
         print(
@@ -176,8 +181,8 @@ class LivePoller:
         print(f"  {'─'*36}")
 
         seen_inn1: set[str] = self._load_seen_keys_inn1()
-        consecutive_empty = 0
-        _EMPTY_EXIT_THRESHOLD = 2   # consecutive empty polls → inn1 done
+        all_balls: list[dict] = []   # ordered accumulation of every legal ball seen
+        max_overs: int = 20          # updated downward on DLS detection
 
         while True:
             try:
@@ -187,28 +192,47 @@ class LivePoller:
                 time.sleep(self.poll_interval)
                 continue
 
+            # Check for DLS/rain reduction in commentary text
+            detected_max = self._detect_dls_overs(items, default=max_overs)
+            if detected_max < max_overs:
+                print(f"[Phase 2] DLS detected — inn1 reduced to {detected_max} overs")
+                max_overs = detected_max
+
             legal_balls = parse_legal_balls(items, innings=1)
             new_balls = [b for b in legal_balls if ball_key(b) not in seen_inn1]
 
             if new_balls:
-                consecutive_empty = 0
                 for b in new_balls:
-                    bk = ball_key(b)
-                    seen_inn1.add(bk)
+                    seen_inn1.add(ball_key(b))
+                    all_balls.append(b)
                     self._append_jsonl(self._ball_events_inn1_file, b)
                     self._print_inn1_ball(b, len(seen_inn1))
-                # Update scorecard after each batch of new balls
                 self._save_scorecard(items, self._scorecard_inn1_file)
             else:
-                consecutive_empty += 1
                 logger.debug(
-                    "[Phase 2] No new inn1 balls (seen=%d, empty_streak=%d)",
-                    len(seen_inn1), consecutive_empty,
+                    "[Phase 2] No new inn1 balls (seen=%d)", len(seen_inn1),
                 )
-                if consecutive_empty >= _EMPTY_EXIT_THRESHOLD and len(seen_inn1) >= 6:
+
+            # --- Inn1 end detection ---
+            if all_balls:
+                wickets = sum(1 for b in all_balls if b.get("wicket"))
+                last_over = all_balls[-1]["over"]
+                over_int  = int(last_over)
+                ball_in_over = round((last_over % 1) * 10)
+                last_over_complete = ball_in_over == 6
+
+                if wickets >= 10:
                     print(
-                        f"\n[Phase 2] Inn1 complete — {len(seen_inn1)} balls recorded. "
-                        f"Transitioning to Phase 2.5...\n"
+                        f"\n[Phase 2] Inn1 complete — all out "
+                        f"({len(seen_inn1)} balls). Transitioning to Phase 2.5...\n"
+                    )
+                    self._phase25_init_from_inn1()
+                    return
+
+                if last_over_complete and over_int >= max_overs - 1:
+                    print(
+                        f"\n[Phase 2] Inn1 complete — {max_overs} overs done "
+                        f"({len(seen_inn1)} balls). Transitioning to Phase 2.5...\n"
                     )
                     self._phase25_init_from_inn1()
                     return
@@ -279,6 +303,11 @@ class LivePoller:
     # ------------------------------------------------------------------
 
     def _phase3_poll_inn2(self) -> None:
+        # Clear stale inn2 scorecard from any previous run so the win-via-extras
+        # check doesn't fire immediately on ball 1.
+        if self._scorecard_inn2_file.exists():
+            self._scorecard_inn2_file.unlink()
+
         print("[Phase 3] Live inn2 polling loop started\n")
         self._last_new_ball_time = time.monotonic()  # start the stale clock from now
         print(
@@ -317,7 +346,6 @@ class LivePoller:
                     if self._super_over:
                         self._super_over_balls += 1
 
-                    # Normal innings end (no super over in play)
                     if not self._super_over and (
                         output.get("runs_needed", 1) == 0
                         or output.get("wickets", 0) >= 10
@@ -325,6 +353,7 @@ class LivePoller:
                     ):
                         print(f"\n[Phase 3] Match over — final state:")
                         self._print_final(output)
+                        (self._match_dir / "match_complete.flag").touch()
                         return
 
                     # Super over in play: end when decisive result or 12 balls done
@@ -337,11 +366,13 @@ class LivePoller:
                             # Decisive result — match over
                             print(f"\n[Phase 3] Match over (super over) — final state:")
                             self._print_final(output)
+                            (self._match_dir / "match_complete.flag").touch()
                             return
                         else:
                             # Another tie — reset for next super over
                             print("[Phase 3] Super over tied — another super over incoming...")
                             self._super_over_balls = 0
+
             else:
                 logger.debug("No new balls this poll (seen=%d total)", len(self._seen))
                 if not self._super_over and self._detect_super_over(items):
@@ -358,6 +389,27 @@ class LivePoller:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    @staticmethod
+    def _detect_dls_overs(items: list[dict], default: int = 20) -> int:
+        """
+        Scan recent commentary for DLS/rain-reduction messages and return the
+        revised max overs for the innings.  Returns `default` if nothing found.
+
+        Looks for patterns like "revised to 15 overs", "match reduced to 10-over",
+        "DLS method ... 8 overs" in the most recent commentary items.
+        """
+        for item in items[:30]:
+            text = str(item.get("commText", item.get("commentary", ""))).lower()
+            if not any(kw in text for kw in ("revised", "dls", "reduced", "dl method")):
+                continue
+            m = re.search(r"\b(\d+)[- ]over", text)
+            if m:
+                overs = int(m.group(1))
+                if 5 <= overs < default:
+                    logger.info("[Phase 2] DLS overs detected: %d (from: %s)", overs, text[:80])
+                    return overs
+        return default
 
     @staticmethod
     def _detect_super_over(items: list[dict]) -> bool:

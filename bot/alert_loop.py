@@ -24,6 +24,7 @@ import logging
 import os
 
 import httpx
+from telegram.constants import ParseMode
 from telegram.ext import Application
 
 import bot.state as state
@@ -128,9 +129,11 @@ def _build_signal_alert(team1: str, team2: str, ball: int, signal_text: str,
 # ---------------------------------------------------------------------------
 
 async def _send_to_all(app: Application, text: str) -> None:
+    from bot.main import _md_to_html
+    html = _md_to_html(text)
     for chat_id in list(state.subscribed_chats):
         try:
-            await app.bot.send_message(chat_id=chat_id, text=text)
+            await app.bot.send_message(chat_id=chat_id, text=html, parse_mode=ParseMode.HTML)
         except Exception as e:
             logger.warning("Failed to send alert to chat_id=%s: %s", chat_id, e)
 
@@ -179,7 +182,18 @@ async def _tick(client: httpx.AsyncClient, app: Application) -> None:
     rr        = last.get("runs_needed", 0) or 0
     br        = last.get("balls_remaining", 0) or 0
     wk        = last.get("wickets", 0) or 0
-    signals   = last.get("signals", [])
+
+    # Fetch full history to catch signals on any ball (not just the last one)
+    all_signals: list[tuple[int, str]] = []  # (ball_number, signal_text)
+    try:
+        rh = await client.get(f"{base}/matches/{match_id}/history")
+        if rh.status_code == 200:
+            for entry in rh.json():
+                ball_num = entry.get("ball", 0)
+                for sig in entry.get("signals", []):
+                    all_signals.append((ball_num, sig))
+    except Exception:
+        pass
 
     # Fetch inn1 ball count (for lifecycle detection)
     inn1_balls = 0
@@ -248,23 +262,38 @@ async def _tick(client: httpx.AsyncClient, app: Application) -> None:
             logger.info("Sent INN2_STARTED alert for %s", match_id)
 
     # --- PRE_MATCH: tight chase at ball 1 ---
-    if balls == 1 and 0.40 <= win_prob <= 0.60:
+    # Use history to find ball-1 win_prob so we don't miss it if alert_loop
+    # polls late (e.g. poller has already sent several balls by first tick)
+    if balls >= 1:
         fp = f"{match_id}:PRE_MATCH"
         if not state.has_fingerprint(fp):
-            state.add_fingerprint(fp)
-            msg = _build_pre_match_alert(team1, team2, win_prob)
-            await _send_to_all(app, msg)
-            logger.info("Sent PRE_MATCH alert for %s", match_id)
+            try:
+                rh2 = await client.get(f"{base}/matches/{match_id}/history")
+                if rh2.status_code == 200:
+                    hist = rh2.json()
+                    ball1 = next((e for e in hist if e.get("ball") == 1), None)
+                    if ball1:
+                        ball1_wp = ball1.get("win_prob", 0) or 0
+                        if 0.40 <= ball1_wp <= 0.60:
+                            state.add_fingerprint(fp)
+                            msg = _build_pre_match_alert(team1, team2, ball1_wp)
+                            await _send_to_all(app, msg)
+                            logger.info("Sent PRE_MATCH alert for %s", match_id)
+                        else:
+                            # Not a tight chase — mark as seen so we don't re-check
+                            state.add_fingerprint(fp)
+            except Exception:
+                pass
 
-    # --- IN_GAME signals ---
-    for signal_text in signals:
+    # --- IN_GAME signals — scan full history, not just last ball ---
+    for ball_num, signal_text in all_signals:
         fp = f"{match_id}:{signal_text}"
         if not state.has_fingerprint(fp):
             state.add_fingerprint(fp)
-            msg = _build_signal_alert(team1, team2, balls, signal_text,
+            msg = _build_signal_alert(team1, team2, ball_num, signal_text,
                                       win_prob, hotness, rr, br, wk)
             await _send_to_all(app, msg)
-            logger.info("Sent IN_GAME alert for %s: %s", match_id, signal_text)
+            logger.info("Sent IN_GAME alert for %s: %s (ball %d)", match_id, signal_text, ball_num)
 
     # --- MATCH_ENDED ---
     match_over = balls >= 1 and (rr <= 0 or wk >= 10 or br == 0)

@@ -84,10 +84,26 @@ async def _send_chart(update: Update, png: bytes) -> None:
     await update.message.reply_photo(photo=io.BytesIO(png))
 
 
+def _md_to_html(text: str) -> str:
+    """Convert basic markdown to Telegram HTML (bold, italic, code blocks, inline code)."""
+    import re
+    # Code blocks first (before inline) to avoid double-processing
+    text = re.sub(r'```[a-z]*\n?(.*?)```', lambda m: f"<pre>{m.group(1).strip()}</pre>", text, flags=re.DOTALL)
+    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+    # Bold: **text** or __text__
+    text = re.sub(r'\*\*(.+?)\*\*', r'<b>\1</b>', text)
+    text = re.sub(r'__(.+?)__', r'<b>\1</b>', text)
+    # Italic: *text* or _text_ (single, not already converted)
+    text = re.sub(r'\*([^*\n]+?)\*', r'<i>\1</i>', text)
+    text = re.sub(r'(?<!\w)_([^_\n]+?)_(?!\w)', r'<i>\1</i>', text)
+    return text
+
+
 async def _reply(update: Update, text: str) -> None:
+    html = _md_to_html(text)
     # Telegram message limit is 4096 chars; split if needed
-    for i in range(0, len(text), 4096):
-        await update.message.reply_text(text[i:i + 4096])
+    for i in range(0, len(html), 4096):
+        await update.message.reply_text(html[i:i + 4096], parse_mode=ParseMode.HTML)
 
 
 # ---------------------------------------------------------------------------
