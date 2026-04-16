@@ -165,6 +165,8 @@ async def free_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     if not text.strip():
         return
 
+    logger.info("bot | chat=%s | message: %s", update.effective_chat.id, text[:200])
+
     await context.bot.send_chat_action(
         chat_id=update.effective_chat.id, action="typing"
     )
@@ -173,6 +175,7 @@ async def free_text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) 
         if isinstance(chunk, bytes):
             await _send_chart(update, chunk)
         elif chunk:
+            logger.info("bot | chat=%s | reply: %s", update.effective_chat.id, chunk[:200])
             await _reply(update, chunk)
 
 
@@ -184,6 +187,9 @@ async def post_init(application: Application) -> None:
     state.load()
     asyncio.create_task(alert_loop(application))
     logger.info("Alert loop started. Subscribed chats: %d", len(state.subscribed_chats))
+
+    from bot.api import start_api
+    await start_api()
 
 
 # ---------------------------------------------------------------------------

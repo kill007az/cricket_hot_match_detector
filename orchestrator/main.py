@@ -53,18 +53,24 @@ BOT_STATE_PATH  Path to bot_state.json       (default: <project_root>/data/bot_s
 from __future__ import annotations
 
 import json
+import logging
 import os
+import time
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 import requests as _requests
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
+from pydantic import BaseModel
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
 
 ENGINE_URL     = os.environ.get("ENGINE_URL",     "http://localhost:8000")
+BOT_URL        = os.environ.get("BOT_URL",        "http://localhost:8088")
 _DEFAULT_POLLS    = Path(__file__).resolve().parent.parent / "data" / "live_polls"
 _SCHEDULE_PATH    = Path(__file__).resolve().parent.parent / "data" / "ipl_2026_schedule.json"
 LIVE_POLLS_DIR = Path(os.environ.get("LIVE_POLLS_DIR", str(_DEFAULT_POLLS)))
@@ -76,6 +82,18 @@ app = FastAPI(
     version="1.0.0",
     description="Coordination layer — aggregates match history and proxies engine status.",
 )
+
+
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    t0 = time.perf_counter()
+    response = await call_next(request)
+    ms = (time.perf_counter() - t0) * 1000
+    logger.info(
+        "orchestrator | %s %s  ->  %d  (%.0fms)",
+        request.method, request.url.path, response.status_code, ms,
+    )
+    return response
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -249,6 +267,31 @@ def bot_status():
         "subscribers":   len(data.get("subscribed_chats", [])),
         "alerts_sent":   len(data.get("seen_fps", [])),
     }
+
+
+class _ChatRequest(BaseModel):
+    message: str
+    chat_id: str = "streamlit"
+
+
+@app.post("/chat")
+def chat(body: _ChatRequest):
+    """
+    Proxy a chat message to the bot agent and return the reply.
+    Response: { "reply": "...", "charts": ["<base64-png>", ...] }
+    """
+    try:
+        r = _requests.post(
+            f"{BOT_URL}/chat",
+            json={"message": body.message, "chat_id": body.chat_id},
+            timeout=60,
+        )
+        r.raise_for_status()
+        return r.json()
+    except _requests.exceptions.ConnectionError:
+        raise HTTPException(status_code=503, detail="Bot service not reachable.")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
 
 
 @app.get("/matches/{match_id}/scorecard/{innings_num}")
