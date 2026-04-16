@@ -3,19 +3,20 @@ run_live.py — CLI entry point for the live polling service.
 
 Default behaviour (no arguments)
 ---------------------------------
-Queries Cricbuzz for any live IPL match, derives team names and match-id
-automatically, and starts polling.  Works for any IPL fixture without
-touching any config.
+Scrapes cricbuzz.com/live-cricket-scores to find any live IPL match,
+derives team names and match-id automatically, and starts polling.
+Works for any IPL fixture without touching any config.
 
     conda run -n cricket_hot python -m polling.run_live
 
 Override behaviour
 ------------------
 Supply --team1 / --team2 to pin a specific match when multiple IPL games
-are live simultaneously, or to watch a non-IPL T20 match.  --match-id
-overrides the auto-generated slug if needed.
+are live simultaneously.  --cb-id skips auto-discovery entirely.
+--match-id overrides the auto-generated slug if needed.
 
     python -m polling.run_live --team1 CSK --team2 KKR
+    python -m polling.run_live --cb-id 151763 --team1 CSK --team2 KKR
     python -m polling.run_live --match-id csk_vs_kkr_2026-04-14 --team1 CSK --team2 KKR
 
 Match-id slug is generated as:  {team1_lower}_vs_{team2_lower}_{YYYY-MM-DD}
@@ -65,7 +66,7 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Cricbuzz numeric match ID (e.g. 151763). "
-            "Find it in the Cricbuzz match URL. Required — auto-discovery unavailable."
+            "Optional — auto-discovered from cricbuzz.com if omitted."
         ),
     )
     p.add_argument(
@@ -93,23 +94,27 @@ def _resolve_match(args) -> tuple[str, str, str]:
     Return (team1_abbr, team2_abbr, match_id).
 
     If --team1/--team2 are not supplied, polls Cricbuzz until a live IPL
-    match is found.  match-id is auto-generated unless explicitly set.
+    match is found via HTML scraping.  match-id is auto-generated unless
+    explicitly set.
     """
     client = CricbuzzClient()
 
     if args.team1 and args.team2:
-        # Both teams explicitly specified — use them directly
         team1, team2 = args.team1.upper(), args.team2.upper()
     else:
-        # Auto-discovery is not currently available — require explicit teams
-        print(
-            "ERROR: --team1 and --team2 are required.\n"
-            "Auto-discovery is unavailable (Cricbuzz live-listing endpoint changed).\n\n"
-            "Find the match ID from the Cricbuzz URL (e.g. cricbuzz.com/.../<match_id>/...)\n"
-            "then run:\n"
-            "  python -m polling.run_live --team1 CSK --team2 KKR --match-id csk_vs_kkr_2026-04-14\n"
-        )
-        raise SystemExit(1)
+        # Auto-discover any live IPL match
+        print("No teams specified — auto-discovering live IPL match...")
+        result = None
+        while result is None:
+            result = client.find_live_ipl_match()
+            if result is None:
+                print(f"No live IPL match found — retrying in {_DISCOVERY_RETRY_SECS}s...")
+                time.sleep(_DISCOVERY_RETRY_SECS)
+        team1, team2, discovered_cb_id = result
+        print(f"Found: {team1} vs {team2}  (cb_id={discovered_cb_id})")
+        # If --cb-id was not explicitly provided, use the discovered one
+        if args.cb_id is None:
+            args.cb_id = discovered_cb_id
 
     match_id = args.match_id or (
         f"{team1.lower()}_vs_{team2.lower()}_{date.today().isoformat()}"

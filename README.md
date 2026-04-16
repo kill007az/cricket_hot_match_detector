@@ -109,7 +109,7 @@ mkdir data/live_polls
 > **Windows note:** If your project path contains spaces (e.g. `Personal Projects/`), Docker Desktop may
 > fail to create the directory automatically. Always create `data/live_polls` manually before running.
 
-**2. Set match details in `.env`** (create this file in the project root):
+**2. (Optional) Pin a specific match in `.env`:**
 
 ```
 TEAM1=CSK
@@ -117,9 +117,10 @@ TEAM2=KKR
 CB_ID=151763
 ```
 
-Find the numeric Cricbuzz match ID in the match URL:
-`cricbuzz.com/live-cricket-scores/151763/...` → ID is `151763`.
-Auto-discovery is currently unavailable; see [skills/live/cricbuzz_api_endpoints.md](skills/live/cricbuzz_api_endpoints.md).
+If `.env` is omitted or left empty, the poller auto-discovers any live IPL match by scraping
+`cricbuzz.com/cricket-match/live-scores`. Set `TEAM1`/`TEAM2` to pin a specific fixture when
+multiple IPL games are live simultaneously. `CB_ID` is optional — find it in the match URL
+(`cricbuzz.com/live-cricket-scores/151763/...` → `151763`) if you want to skip discovery.
 
 **3. Start all services:**
 
@@ -142,13 +143,14 @@ docker compose logs -f poller    # one service
 
 ### Starting a new match
 
-No rebuild needed. Update `.env` with the new match details, then restart the engine and poller:
+No rebuild needed. Restart the engine and poller — the poller will auto-discover the new match:
 
 ```bash
-# edit .env: update TEAM1, TEAM2, CB_ID
 docker compose restart engine
 docker compose up -d --no-build poller
 ```
+
+To pin a specific fixture, update `.env` with `TEAM1`, `TEAM2` (and optionally `CB_ID`) before restarting.
 
 The engine must be restarted to clear its in-memory match session from the previous match.
 The orchestrator and UI keep running untouched.
@@ -183,8 +185,13 @@ Data is persisted to `data/live_polls/{match_id}/` on the host via bind mount.
 conda activate cricket_hot
 pip install -r requirements.txt
 
-# --team1, --team2, and --cb-id are all required.
-# --cb-id is the numeric ID from the Cricbuzz match URL.
+# No args — auto-discovers any live IPL match
+python run.py
+
+# Pin a specific match
+python run.py --team1 CSK --team2 KKR
+
+# Override Cricbuzz ID (skip discovery)
 python run.py --team1 CSK --team2 KKR --cb-id 151763
 ```
 
@@ -192,8 +199,8 @@ Arguments:
 
 | Flag | Default | Description |
 |---|---|---|
-| `--team1 / --team2` | — | Team abbreviations (e.g. CSK, KKR). **Required.** |
-| `--cb-id` | — | Cricbuzz numeric match ID from the match URL. **Required.** |
+| `--team1 / --team2` | auto-discovered | Team abbreviations (e.g. CSK, KKR). Optional — auto-detected from Cricbuzz if omitted. |
+| `--cb-id` | auto-discovered | Cricbuzz numeric match ID. Optional — found from match URL if omitted. |
 | `--match-id` | auto-generated | Override the data folder slug |
 | `--poll-interval N` | 30 | Seconds between Cricbuzz polls **during inn2** (Phase 2 uses 5 min) |
 | `--port N` | 8000 | Engine API port |

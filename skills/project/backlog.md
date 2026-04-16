@@ -128,15 +128,18 @@ Once cricsheet publishes the match (~1 week), fetch the authoritative version an
 
 ---
 
-### P5 — Auto-discovery of live Cricbuzz match ID (HIGH PRIORITY)
-**Files:** `polling/cricbuzz_client.py` → `find_live_match()`, `polling/poller.py` → `_phase1_find_match()`, `polling/run_live.py`, `run.py`  
-**Problem:** The old Cricbuzz live-listing endpoint (`/api/cricket-match/live-matches`) returned 404 in April 2026. Auto-discovery was disabled; `--cb-id` is now mandatory. Users must manually find the numeric match ID from the Cricbuzz URL each time.  
-**Fix:** Capture a new HAR from `cricbuzz.com/cricket-match/live` during a live match to find the current live-listing endpoint. Once found:
-1. Update `find_live_match()` in `cricbuzz_client.py` with the new URL
-2. Restore auto-discovery loop in `_phase1_find_match()` — poll until target teams appear
-3. Make `--cb-id` optional again (falls back to auto-discovery if omitted)
-4. Update `skills/live/cricbuzz_api_endpoints.md` with the new endpoint  
-**How to find it:** Open DevTools on `cricbuzz.com/cricket-match/live` during a live match, filter XHR, look for a JSON response listing multiple live matches. Follow HAR capture steps in `skills/live/cricbuzz_api_endpoints.md`.
+### P6 — Smart pre-match wait for always-on service
+**Files:** `polling/run_live.py` → `_resolve_match()`, `polling/poller.py` → `_phase1_find_match()`  
+**Problem:** Auto-discovery currently polls every 60s unconditionally. Fine for manual use, but as a 24/7 service this wastes requests during the 20+ hours per day when no match is live. Also two separate retry intervals exist (`_DISCOVERY_RETRY_SECS=60` in `run_live.py`, `poll_interval` in the poller) that should be unified.  
+**Fix:** Pull the IPL schedule (Cricbuzz or a static fixture list) and sleep until ~15 min before the next scheduled match start. Fall back to polling only in the pre-match window. Unify discovery retry interval into a single configurable value.  
+**Why:** When running as a Docker service that restarts after each match, the poller hammers Cricbuzz all night for no reason — risks rate-limiting and wastes resources.
+
+---
+
+### P5 — Auto-discovery of live Cricbuzz match ID ✅
+**Files:** `polling/cricbuzz_client.py` → `_fetch_live_matches()`, `find_live_match()`, `find_live_ipl_match()`; `polling/poller.py` → `_phase1_find_match()`; `polling/run_live.py`  
+**Problem:** The old Cricbuzz live-listing JSON API (`/api/cricket-match/live-matches`) returned 404 in April 2026.  
+**Fix:** HTML scrape of `https://www.cricbuzz.com/live-cricket-scores`. Match URLs in the HTML follow `/live-cricket-scores/{cb_id}/{team1}-vs-{team2}-{rest}` — regex extracts cb_id and team slugs directly. No HAR needed. `--cb-id`, `--team1`, `--team2` are all optional; `run_live.py` with no arguments auto-discovers any live IPL match.
 
 ---
 

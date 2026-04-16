@@ -5,13 +5,16 @@ When endpoints break (404s), use this skill to rediscover the current ones.
 
 ---
 
-## Current working endpoints (verified 2026-04-14)
+## Current working endpoints (verified 2026-04-16)
 
 | Purpose | Method | URL |
 |---|---|---|
 | Ball-by-ball commentary | GET | `https://www.cricbuzz.com/api/mcenter/{cb_id}/full-commentary/{innings}` |
+| Live match listing (HTML scrape) | GET | `https://www.cricbuzz.com/live-cricket-scores` |
 
-**Live match listing**: unknown — use `--cb-id` to pass the match ID manually.
+**Live match listing**: scrape the HTML page (not a JSON API). Match URLs follow the pattern
+`/live-cricket-scores/{cb_id}/{team1}-vs-{team2}-{rest}`. The cb_id and team slugs are extracted
+via regex. Implemented in `CricbuzzClient._fetch_live_matches()`. No HAR needed.
 
 ---
 
@@ -147,4 +150,4 @@ If the response structure changed, also update `adapter.py` — specifically
 | Date | Old URL | New URL | Notes |
 |---|---|---|---|
 | ~2026-04 | `/api/cricket-match/{id}/full-commentary/{inn}` | `/api/mcenter/{id}/full-commentary/{inn}` | Path segment changed; response structure also changed |
-| ~2026-04 | `/api/cricket-match/live-matches` | unknown | Live listing endpoint gone; use `--cb-id` manually |
+| ~2026-04 | `/api/cricket-match/live-matches` | HTML scrape of `/live-cricket-scores` | JSON API gone; switched to HTML regex extraction of cb_id from match URLs |

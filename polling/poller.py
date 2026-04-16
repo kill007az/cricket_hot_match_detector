@@ -142,11 +142,16 @@ class LivePoller:
         if self._cb_id is not None:
             print(f"[Phase 1] Using provided Cricbuzz ID = {self._cb_id}\n")
             return
-        print(
-            "[Phase 1] ERROR: No Cricbuzz match ID provided and auto-discovery is unavailable.\n"
-            "          Find the numeric ID in the Cricbuzz match URL and pass --cb-id <id>."
-        )
-        raise RuntimeError("Cricbuzz match ID required — pass --cb-id")
+
+        print(f"[Phase 1] Auto-discovering live match: {self.team1} vs {self.team2} ...")
+        while True:
+            cb_id = self._cricbuzz.find_live_match(self.team1, self.team2)
+            if cb_id is not None:
+                self._cb_id = cb_id
+                print(f"[Phase 1] Found: cb_id = {self._cb_id}\n")
+                return
+            print(f"[Phase 1] Match not live yet — retrying in {self.poll_interval}s...")
+            time.sleep(self.poll_interval)
 
     # ------------------------------------------------------------------
     # Phase 2: wait for 2nd innings

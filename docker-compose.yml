@@ -31,15 +31,15 @@ services:
   # -------------------------------------------------------------------------
   poller:
     build: .
-    # Override this command via docker-compose.override.yml with match args:
-    #   command: python -m polling.run_live --engine-url http://engine:8000
-    #            --team1 CSK --team2 KKR --cb-id 151763
+    # Default: auto-discovers any live IPL match from cricbuzz.com.
+    # Override via .env or docker-compose.override.yml to pin a specific match:
+    #   TEAM1=CSK TEAM2=KKR CB_ID=151763
     command: >
       python -m polling.run_live
       --engine-url http://engine:8000
-      --team1 ${TEAM1:?Set TEAM1 in .env or docker-compose.override.yml}
-      --team2 ${TEAM2:?Set TEAM2 in .env or docker-compose.override.yml}
-      --cb-id ${CB_ID:?Set CB_ID in .env or docker-compose.override.yml}
+      ${TEAM1:+--team1 $TEAM1}
+      ${TEAM2:+--team2 $TEAM2}
+      ${CB_ID:+--cb-id $CB_ID}
     volumes:
       - ./data/live_polls:/app/data/live_polls
     depends_on:

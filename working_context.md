@@ -105,7 +105,7 @@ conda run -n cricket_hot python -m tests.simulate_hot_match
 **Polling service** (`polling/`):
 - `CricbuzzClient` — Cricbuzz unofficial API client with bot-avoidance headers; new endpoint `/api/mcenter/{id}/full-commentary/{inn}` (old `/api/cricket-match/` → 404)
 - `adapter.py` — rewritten for new API field names (`legalRuns`, `totalRuns`, `overNumber`); wide/no-ball dedup by overNumber+timestamp
-- `LivePoller` — 3-phase loop; `--cb-id` required (auto-discovery endpoint gone); resume via `ball_events.jsonl`
+- `LivePoller` — 3-phase loop; auto-discovers cb_id via HTML scrape of cricbuzz.com (P5 ✅); resume via `ball_events.jsonl`
 - `run.py` — unified local launcher (engine + poller)
 - Docker: `Dockerfile` + `docker-compose.yml` for all four services
 
