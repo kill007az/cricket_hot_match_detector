@@ -67,21 +67,80 @@ def parse_legal_balls(items: list[dict], innings: int = 2) -> list[dict]:
 
     Each dict matches the BallEventRequest schema from engine/routes.py:
         {innings, over, runs, extras, wicket}
+
+    extras includes byes, leg-byes, AND runs from any wide/no-ball that shared
+    the same overNumber (i.e. was bowled before the legal delivery on that ball).
+    This ensures the engine's runs_needed decreases correctly for those deliveries.
     """
-    events = []
-    for item in _extract_legal_balls(items):
+    # Build a map: overNumber → all items at that overNumber (sorted by timestamp asc)
+    valid = [
+        item for item in items
+        if item.get("overNumber") is not None and item.get("ballNbr", 0) > 0
+    ]
+    valid.sort(key=lambda x: x.get("timestamp", 0))
+
+    by_over: dict[float, list[dict]] = {}
+    for item in valid:
         over = round(float(item["overNumber"]), 1)
-        legal_runs = int(item.get("legalRuns", 0))
-        total_runs = int(item.get("totalRuns", 0))
-        event_str  = str(item.get("event", ""))
+        by_over.setdefault(over, []).append(item)
+
+    events = []
+    for over in sorted(by_over.keys()):
+        group = by_over[over]
+        # Last item (highest timestamp) is the legal ball
+        legal_item = group[-1]
+        legal_runs = int(legal_item.get("legalRuns", 0))
+        total_runs = int(legal_item.get("totalRuns", 0))
+        event_str  = str(legal_item.get("event", ""))
+
+        # Sum totalRuns from any preceding wide/no-ball items at same overNumber
+        wide_noball_runs = sum(int(it.get("totalRuns", 0)) for it in group[:-1])
+
         events.append({
             "innings": innings,
             "over":    over,
             "runs":    legal_runs,
-            "extras":  total_runs - legal_runs,   # byes + legByes for legal deliveries
+            "extras":  (total_runs - legal_runs) + wide_noball_runs,
             "wicket":  "WICKET" in event_str,
         })
     return events
+
+
+def parse_extra_deliveries(items: list[dict], innings: int = 2) -> list[dict]:
+    """
+    Return wide and no-ball deliveries — those with overNumber + ballNbr > 0
+    that share an overNumber with a legal ball (i.e. were overwritten during
+    deduplication in _extract_legal_balls).
+
+    Each returned dict has:
+        { "innings", "over_key", "extra_runs" }
+
+    over_key is the raw overNumber string used for fingerprinting seen extras.
+    extra_runs is totalRuns for that delivery.
+    """
+    valid = [
+        item for item in items
+        if item.get("overNumber") is not None and item.get("ballNbr", 0) > 0
+    ]
+    valid.sort(key=lambda x: x.get("timestamp", 0))
+
+    # Build map: overNumber → list of items (sorted by timestamp asc)
+    by_over: dict[float, list[dict]] = {}
+    for item in valid:
+        over = round(float(item["overNumber"]), 1)
+        by_over.setdefault(over, []).append(item)
+
+    extras = []
+    for over, group in by_over.items():
+        if len(group) > 1:
+            # All but the last (highest timestamp = legal ball) are wides/no-balls
+            for item in group[:-1]:
+                extras.append({
+                    "innings":    innings,
+                    "over_key":   f"{innings}:{over:.1f}:{item.get('timestamp', 0)}",
+                    "extra_runs": int(item.get("totalRuns", 0)),
+                })
+    return extras
 
 
 def count_legal_balls(items: list[dict]) -> int:
@@ -183,12 +242,41 @@ def extract_scorecard(items: list[dict]) -> dict:
 
     # True team total includes wides/no-ball runs that aren't in ball_events
     team_total = sum_innings_runs(items)
-    wickets    = sum(1 for b in batting if b["balls"] > 0)  # approximate from batters seen
+
+    # Dismissed batters: batsmanStriker on any WICKET ball is the dismissed batter
+    dismissed: set[str] = set()
+    for item in items:
+        if "WICKET" in str(item.get("event", "")):
+            bs = item.get("batsmanStriker") or {}
+            name = bs.get("batName")
+            if name:
+                dismissed.add(name)
+
+    # Current striker/bowler: most recent commentary item with these fields
+    current_striker = None
+    current_bowler  = None
+    for item in reversed(items):
+        if current_striker is None:
+            bs = item.get("batsmanStriker") or {}
+            if bs.get("batName"):
+                current_striker = bs.get("batName")
+        if current_bowler is None:
+            bw = item.get("bowlerStriker") or {}
+            if bw.get("bowlName"):
+                current_bowler = bw.get("bowlName")
+        if current_striker and current_bowler:
+            break
+
+    not_out_names = {b["batName"] for b in batters.values() if b.get("batName") and b["batName"] not in dismissed}
 
     return {
-        "batting":    batting,
-        "bowling":    bowling,
-        "team_total": team_total,
+        "batting":         batting,
+        "bowling":         bowling,
+        "team_total":      team_total,
+        "dismissed":       sorted(dismissed),
+        "not_out":         sorted(not_out_names),
+        "current_striker": current_striker,
+        "current_bowler":  current_bowler,
     }
 
 

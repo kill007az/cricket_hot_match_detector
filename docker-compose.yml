@@ -50,7 +50,7 @@ services:
       - TEAM1=${TEAM1:-}
       - TEAM2=${TEAM2:-}
       - CB_ID=${CB_ID:-}
-    restart: "no"
+    restart: unless-stopped
 
   # -------------------------------------------------------------------------
   # Orchestrator — coordination layer: aggregates match history, proxies

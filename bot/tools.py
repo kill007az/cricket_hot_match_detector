@@ -76,17 +76,26 @@ def get_match_status() -> str:
     wk       = last.get("wickets", 0)
     signals  = last.get("signals", [])
 
+    phase = data.get("phase", "inn2")
+    inn1_summary = data.get("inn1_summary", {})
+
     lines = [f"🏏 {team1} vs {team2}"]
 
-    # --- Inn1 score (batting team) ---
-    try:
-        sc1 = _get(f"/matches/{match_id}/scorecard/1")
-        inn1_total = sc1.get("team_total")
-        inn1_wkts  = sum(1 for b in sc1.get("batting", []) if b.get("balls", 0) > 0) - 1
-        if inn1_total:
-            lines.append(f"{team1}: {inn1_total}/{max(0, inn1_wkts)} (20 ov)")
-    except Exception:
-        pass
+    if phase == "inn1":
+        # Inn1 still in progress — use authoritative summary from orchestrator
+        inn1_runs  = inn1_summary.get("runs", 0)
+        inn1_wkts  = inn1_summary.get("wickets", 0)
+        inn1_overs = inn1_summary.get("overs", "0.0")
+        lines.append(f"{team1}: {inn1_runs}/{inn1_wkts} ({inn1_overs} ov) — innings in progress")
+        lines.append(f"{team2}: yet to bat")
+        return "\n".join(lines)
+
+    # --- Inn1 final score ---
+    if inn1_summary.get("balls", 0) > 0:
+        inn1_runs  = inn1_summary.get("runs", 0)
+        inn1_wkts  = inn1_summary.get("wickets", 0)
+        inn1_overs = inn1_summary.get("overs", "20.0")
+        lines.append(f"{team1}: {inn1_runs}/{inn1_wkts} ({inn1_overs} ov)")
 
     # --- Inn2 live score (chasing team) ---
     try:
@@ -406,14 +415,24 @@ def get_batting_card(innings: int = 2) -> str:
     if not rows:
         return "No batting data available."
 
-    header = f"{'Batter':<22} {'R':>4} {'B':>4} {'4s':>3} {'6s':>3} {'SR':>6}"
+    striker  = data.get("current_striker")
+    not_out  = set(data.get("not_out", []))
+
+    header = f"{'Batter':<22} {'R':>4} {'B':>4} {'4s':>3} {'6s':>3} {'SR':>6}  Status"
     sep    = "-" * len(header)
     lines  = [header, sep]
     for r in rows:
+        if r["name"] in not_out:
+            status = "not out *" + (" ← on strike" if r["name"] == striker else "")
+        else:
+            status = "out"
         lines.append(
             f"{r['name']:<22} {r['runs']:>4} {r['balls']:>4} "
-            f"{r['fours']:>3} {r['sixes']:>3} {r['strike_rate']:>6.1f}"
+            f"{r['fours']:>3} {r['sixes']:>3} {r['strike_rate']:>6.1f}  {status}"
         )
+    lines.append(sep)
+    not_out_list = ", ".join(sorted(not_out)) if not_out else "unknown"
+    lines.append(f"Not out: {not_out_list}")
     return "\n".join(lines)
 
 

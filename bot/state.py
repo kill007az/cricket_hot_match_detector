@@ -3,9 +3,6 @@ bot/state.py — Persistent bot state (subscribed chats + seen alert fingerprint
 
 State is written to disk on every mutation so it survives container restarts.
 File path is controlled by the BOT_STATE_PATH env var (default: data/bot_state.json).
-
-Fingerprint cap: seen_fps is trimmed to _MAX_FPS entries when it grows too large,
-removing the oldest half. Prevents unbounded growth in a 24/7 service.
 """
 
 from __future__ import annotations
@@ -15,7 +12,6 @@ import os
 from pathlib import Path
 
 _STATE_PATH = Path(os.environ.get("BOT_STATE_PATH", "data/bot_state.json"))
-_MAX_FPS = 1000  # trim when exceeded, keep newest 500
 
 
 # ---------------------------------------------------------------------------
@@ -79,7 +75,4 @@ def add_fingerprint(fp: str) -> None:
     if fp in seen_fps:
         return
     seen_fps.append(fp)
-    if len(seen_fps) > _MAX_FPS:
-        # Keep newest half
-        del seen_fps[: _MAX_FPS // 2]
     _save()

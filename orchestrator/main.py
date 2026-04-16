@@ -124,9 +124,18 @@ def _all_match_dirs() -> list[Path]:
 
 
 def _active_match_dir() -> Optional[Path]:
-    """Most recently modified match folder that has at least one engine output."""
-    for d in _all_match_dirs():
-        if (d / "engine_outputs.jsonl").exists():
+    """
+    Most recently modified match folder that has inn1 or inn2 data AND is
+    not yet complete (no match_complete.flag written by the poller).
+    Prefers folders with engine_outputs.jsonl (inn2 in progress),
+    falls back to ball_events_inn1.jsonl (inn1 still in progress).
+    """
+    dirs = _all_match_dirs()
+    for d in dirs:
+        if (d / "engine_outputs.jsonl").exists() and not (d / "match_complete.flag").exists():
+            return d
+    for d in dirs:
+        if (d / "ball_events_inn1.jsonl").exists() and not (d / "match_complete.flag").exists():
             return d
     return None
 
@@ -141,21 +150,54 @@ def _engine_ok() -> bool:
 
 def _match_meta(match_dir: Path) -> dict:
     """Return lightweight metadata for a match folder."""
-    outputs = _read_jsonl(match_dir / "engine_outputs.jsonl")
+    outputs   = _read_jsonl(match_dir / "engine_outputs.jsonl")
+    inn1_balls = _read_jsonl(match_dir / "ball_events_inn1.jsonl")
     last = outputs[-1] if outputs else {}
+
     parts = match_dir.name.split("_vs_")          # "csk_vs_kkr_2026-04-14"
     team1 = parts[0].upper() if len(parts) >= 1 else "?"
     tail  = parts[1] if len(parts) >= 2 else ""    # "kkr_2026-04-14"
     tail_parts = tail.rsplit("_", 1)
     team2 = tail_parts[0].upper() if tail_parts else "?"
     date  = tail_parts[1] if len(tail_parts) == 2 else ""
+
+    # Determine match phase
+    if outputs:
+        phase = "inn2"
+    elif inn1_balls:
+        phase = "inn1"
+    else:
+        phase = "pre"
+
+    # Inn1 summary — prefer scorecard team_total (includes wide/no-ball runs)
+    # over summing ball_events_inn1 (legal deliveries only)
+    inn1_balls_count = len(inn1_balls)
+    inn1_overs   = f"{inn1_balls_count // 6}.{inn1_balls_count % 6}" if inn1_balls_count else "0.0"
+    inn1_wickets = sum(1 for b in inn1_balls if b.get("wicket"))
+    inn1_runs    = sum(b.get("runs", 0) + b.get("extras", 0) for b in inn1_balls)  # fallback
+    sc1_path = match_dir / "scorecard_inn1.json"
+    if sc1_path.exists():
+        try:
+            sc1 = json.loads(sc1_path.read_text(encoding="utf-8"))
+            if sc1.get("team_total"):
+                inn1_runs = sc1["team_total"]
+        except Exception:
+            pass
+
     return {
-        "match_id":      match_dir.name,
-        "team1":         team1,
-        "team2":         team2,
-        "date":          date,
-        "balls_seen":    len(outputs),
-        "last_state":    last,
+        "match_id":        match_dir.name,
+        "team1":           team1,
+        "team2":           team2,
+        "date":            date,
+        "phase":           phase,
+        "balls_seen":      len(outputs),
+        "last_state":      last,
+        "inn1_summary": {
+            "runs":    inn1_runs,
+            "wickets": inn1_wickets,
+            "overs":   inn1_overs,
+            "balls":   inn1_balls_count,
+        },
     }
 
 # ---------------------------------------------------------------------------
@@ -202,20 +244,28 @@ def list_matches():
 
 @app.get("/matches/current")
 def current_match():
-    """Most recently active match with latest engine state."""
+    """
+    Most recently active match with latest engine state.
+
+    Returns match metadata regardless of phase:
+      phase="inn1"  → inn1 still in progress; inn1_summary has current score
+      phase="inn2"  → inn2 in progress or complete; last_state has engine output
+      phase="pre"   → match folder exists but no balls recorded yet
+    """
     match_dir = _active_match_dir()
     if match_dir is None:
         raise HTTPException(status_code=404, detail="No active match found.")
     meta = _match_meta(match_dir)
 
-    # Also proxy the live engine state if available
-    match_id = match_dir.name
-    try:
-        r = _requests.get(f"{ENGINE_URL}/match/{match_id}/state", timeout=3)
-        if r.status_code == 200:
-            meta["engine_state"] = r.json()
-    except Exception:
-        pass
+    # Proxy live engine state if inn2 has started
+    if meta["phase"] == "inn2":
+        match_id = match_dir.name
+        try:
+            r = _requests.get(f"{ENGINE_URL}/match/{match_id}/state", timeout=3)
+            if r.status_code == 200:
+                meta["engine_state"] = r.json()
+        except Exception:
+            pass
 
     return meta
 
