@@ -31,7 +31,15 @@ services:
   # -------------------------------------------------------------------------
   poller:
     build: .
-    command: python -m polling.run_live --engine-url http://engine:8000
+    # Override this command via docker-compose.override.yml with match args:
+    #   command: python -m polling.run_live --engine-url http://engine:8000
+    #            --team1 CSK --team2 KKR --cb-id 151763
+    command: >
+      python -m polling.run_live
+      --engine-url http://engine:8000
+      --team1 ${TEAM1:?Set TEAM1 in .env or docker-compose.override.yml}
+      --team2 ${TEAM2:?Set TEAM2 in .env or docker-compose.override.yml}
+      --cb-id ${CB_ID:?Set CB_ID in .env or docker-compose.override.yml}
     volumes:
       - ./data/live_polls:/app/data/live_polls
     depends_on:
@@ -39,7 +47,10 @@ services:
         condition: service_healthy
     environment:
       - PYTHONUNBUFFERED=1
-    restart: unless-stopped
+      - TEAM1=${TEAM1:-}
+      - TEAM2=${TEAM2:-}
+      - CB_ID=${CB_ID:-}
+    restart: "no"
 
   # -------------------------------------------------------------------------
   # Orchestrator — coordination layer: aggregates match history, proxies

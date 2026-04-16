@@ -193,9 +193,11 @@ Two signals, independent:
 | Signal | When | Logic | Message |
 |---|---|---|---|
 | **Pre-match** | Ball 1 of chase | win_prob at start between 0.40–0.60 | "This is a 50/50 chase — worth watching" |
-| **In-game forecast** | Ball 60+ only | forecaster output ≥ threshold | "Match is heating up — tune in now" |
+| **In-game forecast** | Ball 60+, win_prob 0.25–0.75 | forecaster output ≥ threshold | "Match is heating up — tune in now" |
 
 The 60-ball gate (halfway mark, over 10) suppresses early false positives from structurally close targets. The forecaster provides lead time over the reactive detector.
+
+**Win prob gate (0.25–0.75)**: added after CSK vs KKR 2026-04-16 live run. The forecaster over-amplified a momentum spike in overs 8–9 when win_prob was ~0.20 (KKR clearly losing), firing a false IN_GAME signal. The gate ensures the forecaster is only trusted when the match is genuinely in play. Validated in NB08 — no false positives on any COLD match, no delay to HOT match alerts.
 
 **Implemented** — see `engine/signals.py` for logic, `engine/routes.py` for HTTP surface.
 
@@ -270,6 +272,7 @@ Cricbuzz (unofficial JSON API)
 | Case | Type | Severity | Notes |
 |---|---|---|---|
 | Dominant-team wobble | False positive | Low | Brief scare is worth catching per user preference |
+| Blowout momentum spike (forecaster) | False positive | Medium → mitigated | Forecaster over-amplifies pre-gate momentum when win_prob < 0.25. Fixed by WP gate in signals.py. |
 | Tail-ender heroics (extreme) | False negative | Low | Only truly hopeless chases (9/10 down) miss — 7-down last-ball wins are caught |
 | D/L mid-chase | False positive | Medium | Target revision causes artificial momentum spike. Rare. |
 | Non-IPL calibration | Mis-calibration | High if used beyond IPL | NN trained on IPL scoring rates only |
@@ -286,6 +289,7 @@ Cricbuzz (unofficial JSON API)
 | `04_model_interpretability.ipynb` | Captum: integrated gradients, sensitivity, heatmaps, feature ablation |
 | `06_hotness_nn.ipynb` | Final hotness pipeline using NN win prob, all 6 matches |
 | `07_hotness_forecast.ipynb` | Autoregressive hotness forecasting, exploratory viz, model training |
+| `08_hotness_formula_tuning.ipynb` | Hotness formula variants × 7 validation matches; WP gate diagnosis on CSK vs KKR |
 
 ---
 

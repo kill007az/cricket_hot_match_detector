@@ -98,8 +98,40 @@ cricket_hot_match_detector/
 
 ## Quickstart — Docker (recommended)
 
+### First-time setup
+
+**1. Create the live polls directory** (required before first run — Docker bind mount will fail without it):
+
 ```bash
-docker compose up --build
+mkdir data/live_polls
+```
+
+> **Windows note:** If your project path contains spaces (e.g. `Personal Projects/`), Docker Desktop may
+> fail to create the directory automatically. Always create `data/live_polls` manually before running.
+
+**2. Set match details in `.env`** (create this file in the project root):
+
+```
+TEAM1=CSK
+TEAM2=KKR
+CB_ID=151763
+```
+
+Find the numeric Cricbuzz match ID in the match URL:
+`cricbuzz.com/live-cricket-scores/151763/...` → ID is `151763`.
+Auto-discovery is currently unavailable; see [skills/live/cricbuzz_api_endpoints.md](skills/live/cricbuzz_api_endpoints.md).
+
+**3. Start all services:**
+
+```bash
+docker compose up --build -d
+```
+
+`-d` runs containers in the background (detached). To stream logs after:
+
+```bash
+docker compose logs -f           # all services
+docker compose logs -f poller    # one service
 ```
 
 | Service | URL |
@@ -108,18 +140,37 @@ docker compose up --build
 | Orchestrator API | http://localhost:8080/docs |
 | Live dashboard (Streamlit) | http://localhost:8501 |
 
-**`--cb-id` is required** — find the numeric Cricbuzz match ID in the match URL
-(e.g. `cricbuzz.com/live-cricket-scores/151763/...` → ID is `151763`).
-Auto-discovery is currently unavailable; see `skills/live/cricbuzz_api_endpoints.md`.
+### Starting a new match
+
+No rebuild needed. Update `.env` with the new match details, then restart the engine and poller:
 
 ```bash
-# docker-compose.override.yml
-services:
-  poller:
-    command: >
-      python -m polling.run_live
-      --engine-url http://engine:8000
-      --team1 CSK --team2 KKR --cb-id 151763
+# edit .env: update TEAM1, TEAM2, CB_ID
+docker compose restart engine
+docker compose up -d --no-build poller
+```
+
+The engine must be restarted to clear its in-memory match session from the previous match.
+The orchestrator and UI keep running untouched.
+
+### Replaying a match from scratch
+
+If the poller was restarted mid-match and you want to re-process all balls:
+
+```bash
+rm data/live_polls/<match_id>/ball_events.jsonl
+docker compose restart engine
+docker compose up -d --no-build poller
+```
+
+The poller uses `ball_events.jsonl` as its seen-set. Deleting it forces a full replay from Cricbuzz.
+The engine must also be restarted — otherwise it still holds the previous session in memory and
+will return duplicates for every ball.
+
+### Stopping
+
+```bash
+docker compose down
 ```
 
 Data is persisted to `data/live_polls/{match_id}/` on the host via bind mount.
