@@ -2,6 +2,8 @@
 
 A real-time engine that watches a T20 cricket chase ball by ball and fires a notification when a match is about to become exciting — before the drama peaks.
 
+> 🎬 **Demo video:** [Watch on YouTube](https://youtu.be/U0DQYkL_TTM)
+
 ---
 
 ## What it does
